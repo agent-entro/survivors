@@ -54,6 +54,169 @@ function pushFx(particles, x, y, color, opts) {
   });
 }
 
+// Player death burst — fires at the dying player's position so
+// peers see the moment, not just a player going gray on the next
+// snapshot. Cause-aware palette: cursed_ground gets sickly green,
+// everything else gets a violent red explosion.
+function playerDeathBurst(particles, x, y, by) {
+  const isCurse = by === 'cursed_ground';
+  const main = isCurse ? '#7bc043' : '#e74c3c';
+  const accent = isCurse ? '#c8d635' : '#7b1212';
+  // Wide outer body burst.
+  for (let i = 0; i < 30; i++) {
+    pushFx(particles, x, y, main, {
+      speedMin: 140, speedMax: 320,
+      lifeMin: 0.35, lifeMax: 0.7,
+      radiusMin: 2.5, radiusMax: 4.5,
+    });
+  }
+  // White-hot core sparks.
+  for (let i = 0; i < 12; i++) {
+    pushFx(particles, x, y, '#ffffff', {
+      speedMin: 200, speedMax: 360,
+      lifeMin: 0.15, lifeMax: 0.3,
+      radiusMin: 1.2, radiusMax: 2.2,
+    });
+  }
+  // Lingering darker debris.
+  for (let i = 0; i < 8; i++) {
+    pushFx(particles, x, y, accent, {
+      speedMin: 50, speedMax: 140,
+      lifeMin: 0.6, lifeMax: 0.9,
+      radiusMin: 2, radiusMax: 3.5,
+    });
+  }
+}
+
+// Consumable spawn fanfare — fires once when an elite/brute/boss
+// drops a rare item. Upward fountain in the item's color + outward
+// ring flash so a player panning over later still gets the "oh!"
+// landed-here moment. Server already gates this hard (boss 50%,
+// elite 6%) so this firing means something landed.
+function consumableSpawnFanfare(particles, evt) {
+  const { x, y } = evt;
+  const color = evt.color || '#f39c12';
+  // Outward ring — 16 evenly-spaced particles for a clean shock.
+  for (let i = 0; i < 16; i++) {
+    const angle = (Math.PI * 2 * i) / 16;
+    pushFx(particles, x, y, color, {
+      angle,
+      speedMin: 140, speedMax: 180,
+      lifeMin: 0.35, lifeMax: 0.5,
+      radiusMin: 1.8, radiusMax: 2.6,
+    });
+  }
+  // Upward fountain — 14 particles biased up + slight outward
+  // spread. Reads as the drop "popping" into existence.
+  for (let i = 0; i < 14; i++) {
+    pushFx(particles, x, y, color, {
+      speedMin: 30, speedMax: 100,
+      lifeMin: 0.5, lifeMax: 0.85,
+      radiusMin: 2, radiusMax: 3.5,
+      biasY: -120,
+    });
+  }
+  // White core sparks for the pop accent.
+  for (let i = 0; i < 6; i++) {
+    pushFx(particles, x, y, '#ffffff', {
+      speedMin: 100, speedMax: 200,
+      lifeMin: 0.2, lifeMax: 0.35,
+      radiusMin: 1.2, radiusMax: 2,
+    });
+  }
+}
+
+// Per-consumable pickup burst — distinct feel per type so the moment
+// reads at a glance: bomb explodes outward, magnet pulls inward,
+// shield rings out + glows. Players can tell what they grabbed
+// without reading the label.
+function consumablePickupBurst(particles, evt) {
+  const { x, y, ctype } = evt;
+  switch (ctype) {
+    case 'bomb': {
+      // Explosion — wide red+orange spread + white core sparks.
+      // Sells the actual blast (the damage already applied through
+      // ENEMY_HIT events).
+      for (let i = 0; i < 26; i++) {
+        const c = Math.random() < 0.5 ? '#e74c3c' : '#f39c12';
+        pushFx(particles, x, y, c, {
+          speedMin: 140, speedMax: 360,
+          lifeMin: 0.3, lifeMax: 0.6,
+          radiusMin: 2, radiusMax: 4.5,
+        });
+      }
+      for (let i = 0; i < 10; i++) {
+        pushFx(particles, x, y, '#ffffff', {
+          speedMin: 220, speedMax: 380,
+          lifeMin: 0.15, lifeMax: 0.3,
+          radiusMin: 1.2, radiusMax: 2.2,
+        });
+      }
+      break;
+    }
+    case 'shield': {
+      // Outward ring sweep + soft inner glow particles. The blue
+      // ring on the ground reads as the shield activating.
+      for (let i = 0; i < 24; i++) {
+        const angle = (Math.PI * 2 * i) / 24;
+        pushFx(particles, x, y, '#74b9ff', {
+          angle,
+          speedMin: 160, speedMax: 200,
+          lifeMin: 0.4, lifeMax: 0.55,
+          radiusMin: 2, radiusMax: 3,
+        });
+      }
+      for (let i = 0; i < 8; i++) {
+        pushFx(particles, x, y, '#dff3ff', {
+          speedMin: 30, speedMax: 90,
+          lifeMin: 0.4, lifeMax: 0.7,
+          radiusMin: 2.5, radiusMax: 4,
+        });
+      }
+      break;
+    }
+    case 'magnet': {
+      // Inward pull — particles spawn on a ring and converge on
+      // the pickup point. Negative speeds + outward angles do that
+      // in one go (vx,vy = -cos*speed, -sin*speed = inward motion
+      // from a position offset by +cos*startR, +sin*startR).
+      for (let i = 0; i < 16; i++) {
+        const angle = (Math.PI * 2 * i) / 16 + Math.random() * 0.3;
+        const startR = 60 + Math.random() * 30;
+        const sx = x + Math.cos(angle) * startR;
+        const sy = y + Math.sin(angle) * startR;
+        pushFx(particles, sx, sy, '#f39c12', {
+          angle: angle + Math.PI, // point back toward center
+          speedMin: 220, speedMax: 320,
+          lifeMin: 0.25, lifeMax: 0.4,
+          radiusMin: 1.5, radiusMax: 2.8,
+        });
+      }
+      // Center burst — gold pulse on arrival.
+      for (let i = 0; i < 8; i++) {
+        pushFx(particles, x, y, '#f1c40f', {
+          speedMin: 60, speedMax: 140,
+          lifeMin: 0.3, lifeMax: 0.5,
+          radiusMin: 2, radiusMax: 3.2,
+        });
+      }
+      break;
+    }
+    default: {
+      // Unknown / future consumable — fall back to the original
+      // generic burst.
+      for (let i = 0; i < 12; i++) {
+        pushFx(particles, x, y, evt.color || '#f39c12', {
+          speedMin: 80, speedMax: 200,
+          lifeMin: 0.3, lifeMax: 0.5,
+          radiusMin: 2, radiusMax: 3.2,
+        });
+      }
+      break;
+    }
+  }
+}
+
 // Per-enemy death VFX. Replaces the old uniform meteor-ring with
 // bursts shaped by the dying enemy's personality — swarm flickers
 // out fast, tank craters with chunky debris, brute violently
@@ -308,7 +471,13 @@ export function applySimEvent(evt, client) {
       break;
 
     case 'playerDeath':
-      if (isMe) sfx('death');
+      sfx('death'); // everyone hears it — someone just dropped
+      if (isMe) shake(0.45); // big jolt for the dying player
+      // Death burst at the player position so peers SEE the kill
+      // happen, not just a player going gray on the next snapshot.
+      if (evt.x !== undefined) {
+        playerDeathBurst(client.particles, evt.x, evt.y, evt.by);
+      }
       if (client.onPlayerDeath) client.onPlayerDeath(evt);
       break;
 
@@ -365,6 +534,111 @@ export function applySimEvent(evt, client) {
       sfx('hive_burst');
       break;
 
+    case 'enemyShoot':
+      // Hostile fire — sharp warning sound + muzzle flash particles.
+      sfx('spit'); // reuse spit sfx for now — higher pitch reads as hostile
+      for (let i = 0; i < 4; i++) {
+        pushFx(client.particles, evt.x, evt.y, evt.name === 'boss' ? '#d63031' : '#6c5ce7', {
+          speedMin: 40, speedMax: 80,
+          lifeMin: 0.15, lifeMax: 0.3,
+          radiusMin: 1, radiusMax: 2.5,
+        });
+      }
+      break;
+
+    case 'enemyAim': {
+      // Telegraph windup before an enemy fires. Drops a dotted line
+      // of color-coded particles between shooter and locked target so
+      // the player has a reaction window to step out of the line.
+      // Plus a charging burst on the enemy itself so they read as
+      // "winding up" even when the player is looking elsewhere.
+      const color = evt.name === 'boss' ? '#d63031' : '#6c5ce7';
+      const dur = evt.duration || 0.4;
+      const dx = (evt.tx - evt.x), dy = (evt.ty - evt.y);
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const segments = Math.max(6, Math.min(14, Math.round(dist / 35)));
+      for (let i = 1; i <= segments; i++) {
+        const t = i / (segments + 1);
+        client.particles.push({
+          x: evt.x + dx * t,
+          y: evt.y + dy * t,
+          vx: 0, vy: 0,
+          life: dur, maxLife: dur,
+          color,
+          radius: 1.8 + (1 - t) * 1.2, // bigger near the shooter
+        });
+      }
+      // Charging glow on the enemy — small inward-drifting motes
+      // that look like the enemy is gathering energy.
+      for (let i = 0; i < 6; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const startR = 14 + Math.random() * 10;
+        client.particles.push({
+          x: evt.x + Math.cos(angle) * startR,
+          y: evt.y + Math.sin(angle) * startR,
+          vx: -Math.cos(angle) * 60,
+          vy: -Math.sin(angle) * 60,
+          life: dur * 0.6, maxLife: dur * 0.6,
+          color,
+          radius: 1.5 + Math.random(),
+        });
+      }
+      break;
+    }
+
+    case 'bossPhase': {
+      // Phase transition VFX — brief screen flash + particle burst at
+      // boss position. Phase 3 escalates to deep red and calls an
+      // optional minimap border flash if the client shim supports it.
+      const p3 = evt.phase === 3;
+      shake(p3 ? 0.25 : 0.15);
+      flash(p3 ? 0.20 : 0.12);
+      sfx('boss_telegraph'); // reuse until a dedicated phase-change cue exists
+      // Outer burst — phase-colored explosion ring
+      const burstColor = p3 ? '#7b1212' : '#e17055';
+      for (let i = 0; i < (p3 ? 32 : 20); i++) {
+        pushFx(client.particles, evt.x, evt.y, burstColor, {
+          speedMin: 100, speedMax: 300,
+          lifeMin: 0.4, lifeMax: 0.8,
+          radiusMin: 2, radiusMax: 4.5,
+        });
+      }
+      if (p3) {
+        // Phase 3 gets extra white-hot sparks to read as a
+        // distinct escalation vs phase 2.
+        for (let i = 0; i < 12; i++) {
+          pushFx(client.particles, evt.x, evt.y, '#ffffff', {
+            speedMin: 200, speedMax: 400,
+            lifeMin: 0.15, lifeMax: 0.3,
+            radiusMin: 1.2, radiusMax: 2.2,
+          });
+        }
+        if (client.minimapBorderFlash) client.minimapBorderFlash(0.6);
+      }
+      break;
+    }
+
+    case 'bossSpawn':
+      // Boss arrival — ominous sfx, big shake, deep red burst at
+      // spawn so everyone knows where THE DEMON landed.
+      sfx('boss_telegraph');
+      shake(0.35);
+      for (let i = 0; i < 24; i++) {
+        pushFx(client.particles, evt.x, evt.y, '#d63031', {
+          speedMin: 80, speedMax: 220,
+          lifeMin: 0.5, lifeMax: 0.9,
+          radiusMin: 2, radiusMax: 4,
+        });
+      }
+      for (let i = 0; i < 8; i++) {
+        pushFx(client.particles, evt.x, evt.y, '#7b1212', {
+          speedMin: 30, speedMax: 100,
+          lifeMin: 0.7, lifeMax: 1.1,
+          radiusMin: 3, radiusMax: 5,
+        });
+      }
+      break;
+
     case 'evolution':
       if (isMe) shake(0.5);
       spawn(evt.x, evt.y, '#f39c12', 20);
@@ -373,5 +647,80 @@ export function applySimEvent(evt, client) {
     case 'waveSurvived':
       if (client.onWaveSurvived) client.onWaveSurvived(evt);
       break;
+
+    case 'consumableSpawn':
+      // Rare drop — make it loud. Upward fountain + ring flash so
+      // an off-screen player who pans over still notices it landed
+      // (server gate keeps this rare; we don't have to be subtle).
+      consumableSpawnFanfare(client.particles, evt);
+      sfx('powerup');
+      break;
+
+    case 'consumablePickup': {
+      if (isMe) sfx('powerup');
+      // Label always floats up — same shape across types so the
+      // text reads as a system-level pickup notification.
+      client.floatingTexts.push({
+        x: evt.x, y: evt.y,
+        text: evt.label || (evt.ctype || '').toUpperCase(),
+        color: evt.color || '#f39c12',
+        life: 1.0, maxLife: 1.0, vy: -50,
+      });
+      // Per-type pickup burst — bomb explodes, shield rings out,
+      // magnet pulls in. Picker also gets a flavor-fitting shake.
+      consumablePickupBurst(client.particles, evt);
+      if (isMe) {
+        if (evt.ctype === 'bomb') shake(0.35);
+        else if (evt.ctype === 'magnet') shake(0.08);
+        else shake(0.12);
+      }
+      break;
+    }
+
+    case 'statusApplied': {
+      // Light particle pop when a status lands — type-coded palette.
+      // Kept small: chain/storm hits fire these repeatedly and would
+      // overwhelm the screen if each burst were too large.
+      const { statusType, x, y } = evt;
+      if (statusType === 'burn') {
+        // 3-5 orange embers rising from the enemy.
+        const count = 3 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < count; i++) {
+          pushFx(client.particles, x, y, Math.random() < 0.6 ? '#e67e22' : '#f39c12', {
+            speedMin: 20, speedMax: 60,
+            lifeMin: 0.4, lifeMax: 0.7,
+            radiusMin: 1.5, radiusMax: 2.5,
+            biasY: -80,
+          });
+        }
+      } else if (statusType === 'slow') {
+        // 2-3 blue motes.
+        const count = 2 + Math.floor(Math.random() * 2);
+        for (let i = 0; i < count; i++) {
+          pushFx(client.particles, x, y, '#74b9ff', {
+            speedMin: 30, speedMax: 80,
+            lifeMin: 0.3, lifeMax: 0.5,
+            radiusMin: 1.5, radiusMax: 2.5,
+          });
+        }
+      } else if (statusType === 'freeze') {
+        // 4-6 white/cyan shards + a fat center flash.
+        const count = 4 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < count; i++) {
+          pushFx(client.particles, x, y, Math.random() < 0.5 ? '#dff9fb' : '#00cec9', {
+            speedMin: 40, speedMax: 110,
+            lifeMin: 0.3, lifeMax: 0.6,
+            radiusMin: 1.5, radiusMax: 3,
+          });
+        }
+        // Brief white core flash at impact point.
+        pushFx(client.particles, x, y, '#ffffff', {
+          speedMin: 0, speedMax: 5,
+          lifeMin: 0.12, lifeMax: 0.18,
+          radiusMin: 6, radiusMax: 9,
+        });
+      }
+      break;
+    }
   }
 }

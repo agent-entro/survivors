@@ -7,6 +7,7 @@ export const WEAPON_ICONS = {
   shield: '🛡️', lightning_field: '⚡',
   dragon_storm: '🐉',
   thunder_god: '⚡', meteor_orbit: '🔥', fortress: '🏰',
+  inferno_wheel: '🔥', tesla_aegis: '🌩️',
 };
 
 export function createWeapon(type) {
@@ -20,8 +21,10 @@ export function createWeapon(type) {
       color: '#e67e22', pulsePhase: 0,
     };
     case 'charge': return {
-      type: 'charge', cooldown: 2.5, timer: 0, damage: 40, speed: 500,
-      duration: 0.3, width: 40, color: '#e74c3c',
+      // Buffed per barn's analysis: was 16 dps (worst weapon), now
+      // ~22 dps base + trail damage rewards aggressive pathing.
+      type: 'charge', cooldown: 1.8, timer: 0, damage: 40, speed: 500,
+      duration: 0.3, width: 55, color: '#e74c3c',
       active: false, chargeTimer: 0, chargeDx: 0, chargeDy: 0,
     };
     case 'orbit': return {
@@ -84,6 +87,33 @@ export function createWeapon(type) {
       shockwaveRadius: 120, shockwaveDamage: 40,
       active: false, chargeTimer: 0, chargeDx: 0, chargeDy: 0,
       phase: 0, color: '#74b9ff',
+    };
+    // Breath + Orbit fusion. 4 rotating flame blades at 85u; each blade
+    // has a 32u contact aura that applies burn on hit. No direct meteor
+    // or shockwave — pure sustained DoT melee clear.
+    case 'inferno_wheel': return {
+      type: 'inferno_wheel', cooldown: 0, timer: 0,
+      bladeCount: 4, radius: 85, bladeRadius: 32,
+      bladeDamage: 20,
+      burnDps: 10, burnDuration: 2.0,
+      rotSpeed: 3.2, phase: 0,
+      color: '#f39c12',
+    };
+    // Chain + Shield fusion. Permanent knockback shield + chain pulses
+    // every pulseCooldown, slow on every hop. Every 4th pulse is an
+    // overcharge: shield expands briefly and stuns everything inside
+    // (mirrors thunder_god's rhythmic wipe so chain-evolve paths have
+    // the same "climactic beat" signature). pulseTimer is separate from
+    // the always-on w.timer so cooldown:99999 never blocks the pulse.
+    case 'tesla_aegis': return {
+      type: 'tesla_aegis', cooldown: 99999, timer: 99999,
+      shieldRadius: 90, shieldDamage: 14, knockback: 140,
+      pulseCooldown: 0.5, pulseTimer: 0,
+      chainRange: 200, chainDamage: 30, chains: 3,
+      pulseCount: 0, overchargeEvery: 4,
+      overchargeStun: 0.3, overchargeExpandR: 150, overchargeExpandLife: 0.25,
+      phase: 0, pulsePhase: 0,
+      color: '#74b9ff',
     };
     default: return null;
   }
