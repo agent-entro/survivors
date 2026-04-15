@@ -355,14 +355,17 @@ export function drawChainEffects(ctx, chainEffects) {
 
 // Meteor warn + explode effects — falling streak above the warn ring,
 // dashed warn circle + pulsing center, expanding ring on explode.
-// Reused by meteor + meteor_orbit + fortress shockwave + enemy death
-// rings (all push to g.meteorEffects with the same shape).
+// Reused by meteor + meteor_orbit + fortress shockwave + void_anchor impact +
+// enemy death rings (all push to g.meteorEffects with the same shape).
+// warnLife: optional override for warn phase duration so non-standard delays
+// (e.g. void_anchor's 0.7s) normalise the streak correctly.
 export function drawMeteorEffects(ctx, meteorEffects) {
   for (const m of meteorEffects) {
     if (m.phase === 'warn') {
       // Falling streak from off-screen down to the warn ring — sells
       // the "something's coming" beat before the explosion.
-      const t = 1 - (m.life / 0.5);
+      const warnDur = m.warnLife || 0.5;
+      const t = Math.max(0, 1 - (m.life / warnDur));
       const streakStart = m.y - 480 * (1 - t);
       const grad = ctx.createLinearGradient(m.x, streakStart, m.x, m.y);
       grad.addColorStop(0,   'rgba(255, 99, 72, 0)');
@@ -393,6 +396,36 @@ export function drawMeteorEffects(ctx, meteorEffects) {
       ctx.arc(m.x, m.y, m.radius * (2 - t), 0, Math.PI * 2);
       ctx.fill();
     }
+  }
+}
+
+// Gravitational pull rings — shrinking dashed circles that telegraph
+// the inward pull during a void_anchor charge. Color is violet to
+// match the weapon's color; alpha pulses so it reads clearly over terrain.
+export function drawPendingPulls(ctx, pendingPulls) {
+  if (!pendingPulls || pendingPulls.length === 0) return;
+  for (const pull of pendingPulls) {
+    const progress = pull.elapsed / pull.duration; // 0 → 1
+    const alpha = 0.5 * (1 - progress);
+    const ringR = pull.radius * (1 - progress * 0.3); // ring contracts slightly
+    ctx.strokeStyle = `rgba(108, 92, 231, ${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 6]);
+    ctx.shadowColor = '#6c5ce7';
+    ctx.shadowBlur = 10;
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(pull.x, pull.y, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Second inner ring for depth
+    ctx.strokeStyle = `rgba(162, 155, 254, ${alpha * 0.6})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(pull.x, pull.y, ringR * 0.6, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
   }
 }
 
