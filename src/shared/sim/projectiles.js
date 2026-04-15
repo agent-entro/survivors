@@ -1,6 +1,7 @@
 // Projectile movement, range cleanup, enemy collision, and obstacle
 // blocking. Pure sim; damage routes through damage.js + events.
 import { damageEnemy } from './damage.js';
+import { applyStatus } from './enemies.js';
 import { circleRectCollision } from './collision.js';
 import { PROJECTILE_BLOCKERS } from '../maps.js';
 
@@ -39,15 +40,25 @@ export function updateProjectiles(g, dt) {
 
     for (let j = g.enemies.length - 1; j >= 0; j--) {
       const e = g.enemies[j];
+      // Skip enemies this projectile has already hit — otherwise a
+      // fast projectile burns one pierce per frame while overlapping
+      // a single big enemy (tank/boss), so pierce never actually
+      // reaches enemies behind the first target. Reported by
+      // barronn85 in #playtest. proj.hit is allocated lazily — most
+      // projectiles never need it (pierce 1 dies on first contact).
+      if (proj.hit && proj.hit.has(e)) continue;
       const edx = proj.x - e.x;
       const edy = proj.y - e.y;
       if (edx * edx + edy * edy < (proj.radius + e.radius) ** 2) {
         damageEnemy(g, e, dmg, proj.owner);
+        if (proj.statusOnHit) applyStatus(g, e, proj.statusOnHit);
         proj.pierce--;
         if (proj.pierce <= 0) {
           g.projectiles.splice(i, 1);
           break;
         }
+        if (!proj.hit) proj.hit = new Set();
+        proj.hit.add(e);
       }
     }
   }
