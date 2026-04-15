@@ -25,6 +25,64 @@ const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 ctx.imageSmoothingEnabled = false;
 
+// --- minimap overlay (bottom-right, MP-only) ---
+const MM = 120;
+const mmCanvas = document.createElement('canvas');
+mmCanvas.width = mmCanvas.height = MM;
+Object.assign(mmCanvas.style, {
+  position: 'fixed', bottom: '12px', right: '12px',
+  width: MM + 'px', height: MM + 'px',
+  borderRadius: '4px', pointerEvents: 'none', zIndex: '50',
+});
+document.body.appendChild(mmCanvas);
+const mmCtx = mmCanvas.getContext('2d');
+
+function drawMinimap() {
+  if (!currState) return;
+  const { players = [] } = currState;
+  const aw = (arena && arena.w) || 3000;
+  const ah = (arena && arena.h) || 3000;
+  const sx = MM / aw, sy = MM / ah;
+
+  mmCtx.clearRect(0, 0, MM, MM);
+  mmCtx.fillStyle = 'rgba(0,0,0,0.55)';
+  mmCtx.fillRect(0, 0, MM, MM);
+
+  for (const p of players) {
+    const isSelf = p.id === myId;
+    const isSpectated = p.id === spectateId;
+
+    if (isSelf && !p.alive) {
+      // Ghost dot for dead self
+      if (p.x && p.y) {
+        mmCtx.fillStyle = 'rgba(150,150,150,0.4)';
+        mmCtx.fillRect(p.x * sx - 2, p.y * sy - 2, 4, 4);
+      }
+      continue;
+    }
+    if (!p.alive) continue;
+
+    const mx = p.x * sx, my = p.y * sy;
+    const r = isSelf ? 4 : 3;
+    mmCtx.fillStyle = isSelf ? '#ffe033' : '#ffffff';
+    mmCtx.beginPath();
+    mmCtx.arc(mx, my, r, 0, Math.PI * 2);
+    mmCtx.fill();
+
+    if (isSpectated && !isSelf) {
+      mmCtx.strokeStyle = '#00e5ff';
+      mmCtx.lineWidth = 1.5;
+      mmCtx.beginPath();
+      mmCtx.arc(mx, my, r + 3, 0, Math.PI * 2);
+      mmCtx.stroke();
+    }
+  }
+
+  mmCtx.strokeStyle = 'rgba(255,255,255,0.3)';
+  mmCtx.lineWidth = 1;
+  mmCtx.strokeRect(0.5, 0.5, MM - 1, MM - 1);
+}
+
 // --- sprite sheet ---
 const spriteSheet = new Image();
 spriteSheet.src = 'sprites.png';
@@ -292,8 +350,8 @@ let prevMyAlive = null;
 // Camera
 let camera = { x: 1500, y: 1500 };
 
-// Spectator: when dead, follow another player
-let spectateIdx = 0;
+// Spectator: when dead, follow another player by ID
+let spectateId = null;
 
 // Input
 let keys = { up: false, down: false, left: false, right: false };
@@ -430,10 +488,32 @@ function processStateChanges(state) {
   const me = state.players.find(p => p.id === myId);
   if (!me) return;
 
-  // Death-screen DOM flip — stays here because event drain happens
-  // before DOM work and we need the latest state object for the
-  // showDeathScreen call.
-  if (prevMyAlive === true && !me.alive) showDeathScreen(state, me);
+  // Death transition: start spectating if anyone alive, else fall back to death screen.
+  if (prevMyAlive === true && !me.alive) {
+    const alive = state.players.filter(p => p.alive && p.id !== myId);
+    spectateId = alive[0]?.id ?? null;
+    if (spectateId) {
+      showSpectateOverlay(spectateId);
+    } else {
+      showDeathScreen(state, me);
+    }
+  }
+
+  // Auto-advance spectate target when they die.
+  if (!me.alive && spectateId) {
+    const target = state.players.find(p => p.id === spectateId);
+    if (!target || !target.alive) {
+      const alive = state.players.filter(p => p.alive && p.id !== myId);
+      spectateId = alive[0]?.id ?? null;
+      if (spectateId) {
+        showSpectateOverlay(spectateId);
+      } else {
+        showDeathScreen(state, me);
+        const hud = document.getElementById('spectate-hud');
+        if (hud) hud.style.display = 'none';
+      }
+    }
+  }
 
   prevMyAlive = me.alive;
 }
@@ -491,6 +571,9 @@ function joinGame() {
 
 function respawnGame() {
   document.getElementById('death-screen').style.display = 'none';
+  spectateId = null;
+  const hud = document.getElementById('spectate-hud');
+  if (hud) hud.style.display = 'none';
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'respawn', weapon: selectedWeapon, prestige: prestigePayload() }));
   }
@@ -508,6 +591,28 @@ function showDeathScreen(state, me) {
     <div style="margin-top:8px;font-size:0.7rem;color:#666">Weapons: ${weaponList}</div>
   `;
   document.getElementById('death-screen').style.display = 'flex';
+}
+
+function showSpectateOverlay(pid) {
+  const player = currState?.players.find(p => p.id === pid);
+  const name = player?.name ?? 'player';
+  const el = document.getElementById('death-screen');
+  if (el) el.style.display = 'none';
+
+  let hud = document.getElementById('spectate-hud');
+  if (!hud) {
+    hud = document.createElement('div');
+    hud.id = 'spectate-hud';
+    Object.assign(hud.style, {
+      position: 'fixed', top: '12px', left: '50%', transform: 'translateX(-50%)',
+      background: 'rgba(0,0,0,0.6)', color: '#fff', padding: '6px 14px',
+      borderRadius: '4px', fontSize: '13px', fontFamily: 'monospace',
+      pointerEvents: 'none', zIndex: '60',
+    });
+    document.body.appendChild(hud);
+  }
+  hud.textContent = `\u{1F441} SPECTATING ${name.toUpperCase()} \u2014 TAB to cycle`;
+  hud.style.display = 'block';
 }
 
 // ============================================================
@@ -619,6 +724,7 @@ function mainLoop(ts) {
 
   // Render
   render(dt);
+  drawMinimap();
 
   requestAnimationFrame(mainLoop);
 }
@@ -636,19 +742,15 @@ function render(dt) {
   const state = lerpState(prevState, currState, interpAlpha);
   const me = state.players.find(p => p.id === myId);
 
-  // Camera target: follow me if alive, otherwise spectate
+  // Camera target: follow me if alive, otherwise follow spectated player.
   let camTarget;
   if (me && me.alive) {
     camTarget = { x: me.x, y: me.y };
+  } else if (spectateId) {
+    const spec = state.players.find(p => p.id === spectateId);
+    camTarget = spec ? { x: spec.x, y: spec.y } : { x: arena.w / 2, y: arena.h / 2 };
   } else {
-    // Spectate: find an alive player
-    const alive = state.players.filter(p => p.alive);
-    if (alive.length > 0) {
-      spectateIdx = spectateIdx % alive.length;
-      camTarget = { x: alive[spectateIdx].x, y: alive[spectateIdx].y };
-    } else {
-      camTarget = { x: arena.w / 2, y: arena.h / 2 };
-    }
+    camTarget = { x: arena.w / 2, y: arena.h / 2 };
   }
 
   // Smooth camera — proper exponential decay so smoothing doesn't drift
@@ -781,17 +883,6 @@ function render(dt) {
 
   ctx.restore();
 
-  // --- spectator label ---
-  if (me && !me.alive) {
-    const alive = state.players.filter(p => p.alive);
-    if (alive.length > 0) {
-      ctx.fillStyle = 'rgba(170, 170, 170, 0.7)';
-      ctx.font = '12px "Chakra Petch", sans-serif';
-      ctx.textAlign = 'center';
-      const specName = alive[spectateIdx % alive.length].name;
-      ctx.fillText(`SPECTATING: ${specName} (click to switch)`, W / 2, H - 30);
-    }
-  }
 
   // --- wave banner (regular + special) ---
   if (state.waveMsg && state.waveMsgTimer > 0) {
@@ -863,6 +954,17 @@ document.addEventListener('keydown', e => {
     const pick = window._levelChoices[idx];
     if (pick) { pick(); e.preventDefault(); return; }
   }
+  // Tab cycles through alive players while spectating.
+  if (e.key === 'Tab' && spectateId !== null) {
+    e.preventDefault();
+    const alive = currState?.players.filter(p => p.alive && p.id !== myId) ?? [];
+    if (alive.length > 0) {
+      const idx = alive.findIndex(p => p.id === spectateId);
+      spectateId = alive[(idx + 1) % alive.length].id;
+      showSpectateOverlay(spectateId);
+    }
+    return;
+  }
   const k = KEY_MAP[e.key.toLowerCase()];
   if (k) { keys[k] = true; e.preventDefault(); }
 });
@@ -895,10 +997,12 @@ document.addEventListener('keydown', e => {
 
 // Click to switch spectate target
 canvas.addEventListener('click', () => {
-  if (currState) {
-    const me = currState.players.find(p => p.id === myId);
-    if (me && !me.alive) {
-      spectateIdx++;
+  if (currState && spectateId !== null) {
+    const alive = currState.players.filter(p => p.alive && p.id !== myId);
+    if (alive.length > 0) {
+      const idx = alive.findIndex(p => p.id === spectateId);
+      spectateId = alive[(idx + 1) % alive.length].id;
+      showSpectateOverlay(spectateId);
     }
   }
 });
