@@ -51,19 +51,33 @@ const drawSprite = makeDrawSprite(ctx, spriteSheet, () => spritesReady);
 
 // --- sound effects (Web Audio API) ---
 let audioCtx = null;
+let sfxMaster = null;       // master gain for all SFX — keeps them from drowning BGM
+let activeSfxCount = 0;
+const MAX_CONCURRENT_SFX = 12; // hard cap — prevents audio buffer overload
 function getAudio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    sfxMaster = audioCtx.createGain();
+    sfxMaster.gain.value = sfxVol; // SFX master volume — driven by slider
+    sfxMaster.connect(audioCtx.destination);
+  }
   return audioCtx;
 }
+function getSfxDest() { return sfxMaster || getAudio() && sfxMaster; }
 
 function sfx(type) {
   try {
     const ac = getAudio();
+    if (activeSfxCount >= MAX_CONCURRENT_SFX) return; // drop SFX when saturated
     const t = ac.currentTime;
     const osc = ac.createOscillator();
     const gain = ac.createGain();
+    const dest = getSfxDest();
     osc.connect(gain);
-    gain.connect(ac.destination);
+    gain.connect(dest);
+    // Track concurrent SFX so we can cap them
+    activeSfxCount++;
+    osc.onended = () => { activeSfxCount = Math.max(0, activeSfxCount - 1); };
 
     switch (type) {
       case 'hit': // enemy takes damage — short blip
@@ -100,7 +114,7 @@ function sfx(type) {
         notes.forEach((freq, i) => {
           const o = ac.createOscillator();
           const g = ac.createGain();
-          o.connect(g); g.connect(ac.destination);
+          o.connect(g); g.connect(dest);
           o.type = 'triangle';
           o.frequency.setValueAtTime(freq, t + i * 0.08);
           g.gain.setValueAtTime(0.1, t + i * 0.08);
@@ -127,7 +141,7 @@ function sfx(type) {
         freqs.forEach((freq, i) => {
           const o = ac.createOscillator();
           const g = ac.createGain();
-          o.connect(g); g.connect(ac.destination);
+          o.connect(g); g.connect(dest);
           o.type = 'sawtooth';
           o.frequency.setValueAtTime(freq, t + i * 0.15);
           o.frequency.linearRampToValueAtTime(freq * 0.7, t + i * 0.15 + 0.15);
@@ -177,7 +191,7 @@ function sfx(type) {
         osc.start(t); osc.stop(t + 0.15);
         const o2 = ac.createOscillator();
         const g2 = ac.createGain();
-        o2.connect(g2); g2.connect(ac.destination);
+        o2.connect(g2); g2.connect(dest);
         o2.type = 'square';
         o2.frequency.setValueAtTime(800, t + 0.03);
         o2.frequency.linearRampToValueAtTime(400, t + 0.1);
@@ -212,7 +226,7 @@ function sfx(type) {
         // high squelch layer
         const hb2 = ac.createOscillator();
         const hg2 = ac.createGain();
-        hb2.connect(hg2); hg2.connect(ac.destination);
+        hb2.connect(hg2); hg2.connect(dest);
         hb2.type = 'square';
         hb2.frequency.setValueAtTime(500, t + 0.02);
         hb2.frequency.linearRampToValueAtTime(250, t + 0.1);
@@ -234,7 +248,7 @@ function sfx(type) {
         // high screech overtone
         const bt2 = ac.createOscillator();
         const bg2 = ac.createGain();
-        bt2.connect(bg2); bg2.connect(ac.destination);
+        bt2.connect(bg2); bg2.connect(dest);
         bt2.type = 'square';
         bt2.frequency.setValueAtTime(300, t + 0.1);
         bt2.frequency.linearRampToValueAtTime(600, t + 0.25);
@@ -277,7 +291,7 @@ function sfx(type) {
         osc.start(t); osc.stop(t + 0.15);
         const ho2 = ac.createOscillator();
         const hg2 = ac.createGain();
-        ho2.connect(hg2); hg2.connect(ac.destination);
+        ho2.connect(hg2); hg2.connect(dest);
         ho2.type = 'sine';
         ho2.frequency.setValueAtTime(659, t + 0.05);
         ho2.frequency.linearRampToValueAtTime(1047, t + 0.15);
@@ -320,7 +334,7 @@ window.addEventListener('beforeunload', () => {
   track({ type: 'session_end', duration_ms: Date.now() - sessionStart });
 });
 
-// --- battle music (map-aware + mute toggle) ---
+// --- music system (menu + battle, map-aware + mute toggle) ---
 const MAP_TRACKS = {
   arena: 'arena_theme.ogg',
   neon: 'neon_grid.ogg',
@@ -328,21 +342,112 @@ const MAP_TRACKS = {
   graveyard: 'graveyard_theme.ogg',
   ruins: 'ruins_theme.ogg',
 };
+const MENU_TRACK = 'menu_theme.ogg';
 const DEFAULT_TRACK_OGG = 'survivors_battle.ogg';
 const DEFAULT_TRACK_MP3 = 'survivors_battle.mp3';
-const MUSIC_VOL = 0.35;
+// Volume levels — persisted per-slider in localStorage.
+let bgmVol = 0.45;
+let sfxVol = 0.60;
+try { const v = localStorage.getItem('survivors_bgm_vol'); if (v !== null) bgmVol = +v; } catch (_) {}
+try { const v = localStorage.getItem('survivors_sfx_vol'); if (v !== null) sfxVol = +v; } catch (_) {}
+const MENU_VOL_RATIO = 0.67; // menu music plays at 67% of bgm slider
 
 let bgMusic = null;
 let bgMusicGain = null;
 let musicFading = false;
 let currentTrackSrc = null;
+let menuMusic = null;
+let menuMusicGain = null;
+let menuMusicStarted = false;
 let musicMuted = false;
 try { musicMuted = localStorage.getItem('survivors_mute') === '1'; } catch (_) {}
 function updateMuteBtn() {
   const b = document.getElementById('mute-btn');
   if (b) b.textContent = musicMuted ? '🔇' : '🔊';
 }
+function initVolSliders() {
+  const bs = document.getElementById('vol-bgm');
+  const ss = document.getElementById('vol-sfx');
+  if (bs) bs.value = Math.round(bgmVol * 100);
+  if (ss) ss.value = Math.round(sfxVol * 100);
+}
 updateMuteBtn();
+initVolSliders();
+
+function setBgmVol(v) {
+  bgmVol = Math.max(0, Math.min(1, v / 100));
+  try { localStorage.setItem('survivors_bgm_vol', bgmVol.toFixed(2)); } catch (_) {}
+  if (!musicMuted) {
+    try {
+      const ac = getAudio();
+      if (bgMusicGain) {
+        bgMusicGain.gain.cancelScheduledValues(ac.currentTime);
+        bgMusicGain.gain.linearRampToValueAtTime(bgmVol, ac.currentTime + 0.1);
+      }
+      if (menuMusicGain) {
+        menuMusicGain.gain.cancelScheduledValues(ac.currentTime);
+        menuMusicGain.gain.linearRampToValueAtTime(bgmVol * MENU_VOL_RATIO, ac.currentTime + 0.1);
+      }
+    } catch (_) {}
+  }
+}
+function setSfxVol(v) {
+  sfxVol = Math.max(0, Math.min(1, v / 100));
+  try { localStorage.setItem('survivors_sfx_vol', sfxVol.toFixed(2)); } catch (_) {}
+  if (sfxMaster) sfxMaster.gain.value = sfxVol;
+}
+function toggleVolPanel() {
+  const p = document.getElementById('vol-panel');
+  if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
+}
+
+// Menu music — plays on the start/death screen. Fades out when game
+// starts, fades back in on return. Barn's E dorian 78 BPM ambient.
+function startMenuMusic() {
+  if (menuMusicStarted) return;
+  try {
+    const ac = getAudio();
+    if (ac.state === 'suspended') ac.resume();
+    menuMusic = new Audio();
+    menuMusic.loop = true;
+    menuMusic.volume = 1;
+    menuMusic.src = MENU_TRACK;
+    const mediaSrc = ac.createMediaElementSource(menuMusic);
+    menuMusicGain = ac.createGain();
+    menuMusicGain.gain.value = 0;
+    mediaSrc.connect(menuMusicGain);
+    menuMusicGain.connect(ac.destination);
+    menuMusic.play().catch(() => {});
+    const target = musicMuted ? 0 : bgmVol * MENU_VOL_RATIO;
+    menuMusicGain.gain.setValueAtTime(0, ac.currentTime);
+    menuMusicGain.gain.linearRampToValueAtTime(target, ac.currentTime + 2);
+    menuMusicStarted = true;
+  } catch (_) {}
+}
+
+function fadeOutMenuMusic() {
+  if (!menuMusic || !menuMusicGain) return;
+  try {
+    const ac = getAudio();
+    menuMusicGain.gain.cancelScheduledValues(ac.currentTime);
+    menuMusicGain.gain.setValueAtTime(menuMusicGain.gain.value, ac.currentTime);
+    menuMusicGain.gain.linearRampToValueAtTime(0, ac.currentTime + 1.5);
+    setTimeout(() => { if (menuMusic) menuMusic.pause(); }, 1600);
+  } catch (_) {}
+}
+
+function fadeInMenuMusic() {
+  if (!menuMusic || !menuMusicGain) { startMenuMusic(); return; }
+  try {
+    const ac = getAudio();
+    if (ac.state === 'suspended') ac.resume();
+    menuMusic.play().catch(() => {});
+    const target = musicMuted ? 0 : bgmVol * MENU_VOL_RATIO;
+    menuMusicGain.gain.cancelScheduledValues(ac.currentTime);
+    menuMusicGain.gain.setValueAtTime(menuMusicGain.gain.value, ac.currentTime);
+    menuMusicGain.gain.linearRampToValueAtTime(target, ac.currentTime + 2);
+  } catch (_) {}
+}
 
 function startMusic() {
   try {
@@ -374,7 +479,7 @@ function startMusic() {
     bgMusic.currentTime = 0;
     bgMusic.play().catch(() => {});
     // fade in over 2s (skip if muted)
-    const target = musicMuted ? 0 : MUSIC_VOL;
+    const target = musicMuted ? 0 : bgmVol;
     bgMusicGain.gain.cancelScheduledValues(ac.currentTime);
     bgMusicGain.gain.setValueAtTime(0, ac.currentTime);
     bgMusicGain.gain.linearRampToValueAtTime(target, ac.currentTime + 2);
@@ -398,13 +503,17 @@ function toggleMuteMusic() {
   musicMuted = !musicMuted;
   try { localStorage.setItem('survivors_mute', musicMuted ? '1' : '0'); } catch (_) {}
   updateMuteBtn();
-  if (bgMusicGain) {
-    try {
-      const ac = getAudio();
+  try {
+    const ac = getAudio();
+    if (bgMusicGain) {
       bgMusicGain.gain.cancelScheduledValues(ac.currentTime);
-      bgMusicGain.gain.linearRampToValueAtTime(musicMuted ? 0 : MUSIC_VOL, ac.currentTime + 0.3);
-    } catch (_) {}
-  }
+      bgMusicGain.gain.linearRampToValueAtTime(musicMuted ? 0 : bgmVol, ac.currentTime + 0.3);
+    }
+    if (menuMusicGain) {
+      menuMusicGain.gain.cancelScheduledValues(ac.currentTime);
+      menuMusicGain.gain.linearRampToValueAtTime(musicMuted ? 0 : bgmVol * MENU_VOL_RATIO, ac.currentTime + 0.3);
+    }
+  } catch (_) {}
 }
 
 // --- resize ---
@@ -426,6 +535,7 @@ let selectedMapId = 'neon';    // default map (code-rendered abstract grid)
 
 function selectWeapon(type) {
   selectedWeapon = type;
+  startMenuMusic(); // first interaction triggers audio context
   document.querySelectorAll('.weapon-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.weapon === type);
   });
@@ -495,6 +605,8 @@ function initGame() {
     projectiles: [],
     gems: [],
     heartDrops: [],
+    consumables: [],
+    enemyProjectiles: [],
     particles: [],
     floatingTexts: [],
     time: 0,
@@ -521,6 +633,7 @@ function initGame() {
     // Eager-init here so sim modules don't need defensive `|| []` checks.
     chainEffects: [],
     meteorEffects: [],
+    chargeTrails: [],
     // Map state — `arena` overrides the global WORLD dims; `obstacles`
     // is consumed by sim/collision.js and rendered by the canvas pass.
     arena: { w: map.width, h: map.height },
@@ -721,6 +834,7 @@ function saveBestRun(run) {
 
 function showDeathScreen(g) {
   fadeOutMusic();
+  fadeInMenuMusic();
   track({ type: 'death', wave: g.wave, kills: g.kills, weapons: g.player.weapons.map(w => w.type) });
   const mins = Math.floor(g.time / 60);
   const secs = Math.floor(g.time % 60);
@@ -1226,6 +1340,7 @@ function startGame() {
   }
   const nameEl = document.getElementById('name-input');
   if (nameEl && nameEl.value.trim()) game.playerName = nameEl.value.trim();
+  fadeOutMenuMusic();
   startMusic();
   track({ type: 'game_start' });
   // Load this map's ground tileset (async — render falls back to grid
@@ -1246,6 +1361,7 @@ document.addEventListener('keydown', e => {
   const startVisible = startScreen.style.display !== 'none' && startScreen.offsetParent !== null;
   const deathVisible = deathScreen.style.display === 'flex';
   if (startVisible) {
+    startMenuMusic(); // any key on start screen triggers audio
     if (e.key === '1') selectWeapon('spit');
     else if (e.key === '2') selectWeapon('breath');
     else if (e.key === '3') selectWeapon('charge');
@@ -1275,6 +1391,9 @@ window.hidePrestigeShop = hidePrestigeShop;
 window.purchaseUnlock = purchaseUnlock;
 window.toggleCosmeticEquip = toggleCosmeticEquip;
 window.toggleMute = toggleMuteMusic;
+window.setBgmVol = setBgmVol;
+window.setSfxVol = setSfxVol;
+window.toggleVolPanel = toggleVolPanel;
 window.showBestiary = showBestiary;
 window.hideBestiary = hideBestiary;
 

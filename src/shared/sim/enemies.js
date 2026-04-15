@@ -6,6 +6,7 @@ import { ENEMY_TYPES, enemyType, scaleEnemy } from '../enemyTypes.js';
 import { WORLD_W, WORLD_H } from '../constants.js';
 import { EVT, emit } from './events.js';
 import { pushOutOfObstacles, obstacleAvoidance } from './collision.js';
+import { enemyShootingAi } from './enemyProjectiles.js';
 
 // Reusable zero vector for the no-obstacles path — saves an
 // allocation per enemy per tick on maps without obstacles.
@@ -56,6 +57,9 @@ export function spawnEnemy(g) {
   // start its life clipped through a wall.
   if (g.obstacles && g.obstacles.length > 0) pushOutOfObstacles(e, g.obstacles);
   g.enemies.push(e);
+  // Boss arrival is a moment — emit so clients can play the
+  // ominous sfx + telegraph particles + screen shake.
+  if (e.name === 'boss') emit(g, EVT.BOSS_SPAWN, { x: e.x, y: e.y });
 }
 
 // Returns the alive player with the smallest distance to (ex, ey), plus
@@ -76,6 +80,50 @@ function nearestAlivePlayer(g, ex, ey) {
 // Boss steps + telegraph use g.rng for cadence so server replay stays
 // in sync. Ghost orbit and movement are deterministic given current pos.
 function updateBossAi(g, e, dt, edx, edy, dist) {
+  // --- Phase transitions ---
+  // baseSpeed captured once so phase multipliers stack cleanly off
+  // the wave-scaled value set by scaleEnemy, not the base type speed.
+  if (!e.phase) {
+    e.phase = 1;
+    e.baseSpeed = e.speed;
+  }
+
+  const hpPct = e.hp / e.maxHp;
+  if (hpPct <= 1 / 3 && e.phase < 3) {
+    e.phase = 3;
+    // +30% from phase 2, then another +20% = ×1.56 total vs baseSpeed
+    e.speed = e.baseSpeed * 1.56;
+    e.homing = true;
+    e.summonTimer = 0; // fire first pulse immediately
+    // Drop shoot cooldown in case boss enters phase 3 directly
+    if (e.shootCooldown) e.shootCooldown = 2.0;
+    emit(g, EVT.BOSS_PHASE, { phase: 3, x: e.x, y: e.y });
+  } else if (hpPct <= 2 / 3 && e.phase < 2) {
+    e.phase = 2;
+    e.speed = e.baseSpeed * 1.30;
+    if (e.shootCooldown) e.shootCooldown = 2.0;
+    emit(g, EVT.BOSS_PHASE, { phase: 2, x: e.x, y: e.y });
+  }
+
+  // Phase 3 summon pulse — 3 swarm minions every 8 s, runs during
+  // both stalk and charge so the pressure never lets up.
+  if (e.phase === 3) {
+    e.summonTimer -= dt;
+    if (e.summonTimer <= 0) {
+      e.summonTimer = 8;
+      const base = ENEMY_TYPES.find(t => t.name === 'swarm');
+      for (let s = 0; s < 3; s++) {
+        const sa = g.rng.random() * Math.PI * 2;
+        const sr = 20 + g.rng.random() * 25;
+        const minion = scaleEnemy(base, g.wave, g.rng);
+        minion.x = e.x + Math.cos(sa) * sr;
+        minion.y = e.y + Math.sin(sa) * sr;
+        g.enemies.push(minion);
+      }
+    }
+  }
+
+  // --- Charge movement ---
   if (e.charging > 0) {
     e.x += e.chargeDx * e.speed * 3 * dt;
     e.y += e.chargeDy * e.speed * 3 * dt;
@@ -254,6 +302,14 @@ function updateEnemyTick(g, dt, hash) {
     // hive doesn't keep pumping out swarmlings during the freeze.
     if (e.name === 'spawner' && (!e.stunTimer || e.stunTimer <= 0)) updateSpawnerAi(g, e, dt);
 
+    // Ranged attacks — elites fire aimed shots, bosses fire spreads.
+    // Uses its own nearest-player lookup because the movement target
+    // is scoped inside the stun guard above.
+    if (e.shootCooldown && (!e.stunTimer || e.stunTimer <= 0)) {
+      const shootTarget = nearestAlivePlayer(g, e.x, e.y);
+      enemyShootingAi(g, e, dt, shootTarget);
+    }
+
     if (e.hitFlash > 0) e.hitFlash -= dt * 5;
 
     // Contact damage — hit every overlapping alive player (not just nearest).
@@ -268,7 +324,7 @@ function updateEnemyTick(g, dt, hash) {
         if (p.hp <= 0) {
           p.hp = 0;
           p.alive = false;
-          emit(g, EVT.PLAYER_DEATH, { by: e.name, pid: p.id });
+          emit(g, EVT.PLAYER_DEATH, { x: p.x, y: p.y, by: e.name, pid: p.id });
         }
       }
     }
