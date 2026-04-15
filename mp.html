@@ -27,6 +27,10 @@ body[data-mode="mp"] .sp-only { display: none !important; }
 #level-up .choice:hover { border-color: #f1c40f; }
 #level-up .choice .name { color: #f1c40f; font-size: 1rem; font-weight: 700; margin-bottom: 8px; }
 #level-up .choice .desc { color: #999; font-size: 0.8rem; line-height: 1.5; }
+#level-up .choice.choice--evo { border-color: #f1c40f; box-shadow: 0 0 12px rgba(241,196,15,0.4); }
+#level-up .choice.choice--evo:hover { border-color: #f39c12; box-shadow: 0 0 20px rgba(241,196,15,0.6); }
+#level-up .choice-evo-badge { font-size: 10px; letter-spacing: 0.08em; color: #f1c40f; text-transform: uppercase; margin-bottom: 4px; }
+#level-up .choice .choice-stats { font-size: 11px; color: #aaa; margin-top: 4px; }
 
 #conn-status { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); border: 1px solid #444; color: #f39c12; padding: 6px 14px; font-size: 0.75rem; border-radius: 4px; z-index: 25; display: none; }
 
@@ -142,6 +146,28 @@ canvas { touch-action: none; }
 .beast-card.unseen .beast-name,
 .beast-card.unseen .beast-stats,
 .beast-card.unseen .beast-desc { color: #555; }
+
+/* achievement toast */
+.achievement-toast {
+  position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%) translateY(20px);
+  background: rgba(20,20,20,0.92); border: 1px solid #f1c40f; border-radius: 6px;
+  padding: 8px 16px; color: #fff; font-family: monospace; font-size: 13px;
+  opacity: 0; transition: opacity 0.3s, transform 0.3s; z-index: 200; pointer-events: none;
+}
+.achievement-toast--visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+.ach-icon { margin-right: 6px; }
+.ach-label { color: #f1c40f; }
+/* death screen achievement badges */
+.ds-ach-badge { font-size: 20px; cursor: default; }
+.ds-ach-badge--locked { opacity: 0.25; filter: grayscale(1); }
+
+/* MP lobby map-vote overlay */
+#mp-lobby { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 100; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: #fff; font-family: monospace; display: none; }
+.lobby-map-card { padding: 12px 20px; border: 1px solid #444; border-radius: 6px; cursor: pointer; text-align: center; min-width: 100px; background: rgba(255,255,255,0.05); transition: border-color 0.15s; }
+.lobby-map-card:hover { border-color: #888; }
+.lobby-map-card--selected { border-color: #f1c40f; background: rgba(241,196,15,0.1); }
+.lmc-name { font-size: 14px; font-weight: bold; margin-bottom: 4px; }
+.lmc-votes { font-size: 11px; color: #aaa; }
 </style>
 </head>
 <body data-mode="mp">
@@ -159,7 +185,14 @@ canvas { touch-action: none; }
     <span id="hud-players" class="mp-only"></span>
     <span id="hud-wave">Wave 1</span>
     <span id="hud-weapons"></span>
-    <button id="mute-btn" onclick="toggleMute()" style="background:none;border:none;color:#888;font-size:1.2rem;cursor:pointer;padding:2px 6px;">🔊</button>
+    <div id="audio-wrap" style="position:relative;display:inline-block;pointer-events:auto;">
+      <button id="mute-btn" onclick="toggleMute()" style="background:none;border:none;color:#888;font-size:1.2rem;cursor:pointer;padding:2px 6px;">🔊</button>
+      <button id="vol-toggle" onclick="toggleVolPanel()" style="background:none;border:none;color:#666;font-size:0.7rem;cursor:pointer;padding:2px 4px;" title="Volume">▼</button>
+      <div id="vol-panel" style="display:none;position:absolute;top:100%;right:0;background:#181825;border:1px solid #444;border-radius:6px;padding:10px 14px;min-width:160px;z-index:50;pointer-events:auto;">
+        <label style="color:#999;font-size:0.7rem;display:flex;align-items:center;gap:6px;margin-bottom:8px;">🎵 BGM<input type="range" id="vol-bgm" min="0" max="100" value="45" style="flex:1;accent-color:#e74c3c;height:4px;" oninput="setBgmVol(this.value)"></label>
+        <label style="color:#999;font-size:0.7rem;display:flex;align-items:center;gap:6px;">⚡ SFX<input type="range" id="vol-sfx" min="0" max="100" value="60" style="flex:1;accent-color:#3498db;height:4px;" oninput="setSfxVol(this.value)"></label>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -230,6 +263,8 @@ canvas { touch-action: none; }
     <option value="forest">Dark Forest (trees)</option>
     <option value="ruins">Ancient Ruins (pillars + walls)</option>
     <option value="graveyard">Forsaken Graveyard (tombs)</option>
+    <option value="wilderness">Wilderness (procedural trees)</option>
+    <option value="catacombs">Catacombs (procedural corridor)</option>
   </select>
   <div style="margin-top:16px; display:flex; gap:8px; align-items:center;">
     <button class="shop-btn sp-only" onclick="showPrestigeShop()">SHOP</button>
@@ -315,12 +350,43 @@ canvas { touch-action: none; }
   </div>
 </div>
 
+<div id="mp-lobby" class="mp-only">
+  <div id="lobby-countdown" style="font-size:24px; color:#f1c40f;"></div>
+  <div id="lobby-players" style="font-size:14px; color:#aaa;"></div>
+  <div style="font-size:13px; color:#ccc; margin-bottom:4px;">Vote for a map:</div>
+  <div id="lobby-map-cards" style="display:flex; gap:12px;"></div>
+  <div style="font-size:11px; color:#666; margin-top:8px;">Game starts automatically — majority vote wins</div>
+</div>
+
 <div id="prestige-shop" style="display:none">
   <h2>DRAGON SCALES: <span id="scale-count">0</span></h2>
   <div id="unlock-grid" class="unlock-grid"></div>
   <button onclick="hidePrestigeShop()">CLOSE</button>
 </div>
 
+<script>
+// Shuffle weapon card order so spit isn't always first (prevents
+// default-click bias). Both start-screen and respawn selects get
+// shuffled. The first card after shuffle becomes the selected default.
+document.addEventListener('DOMContentLoaded', () => {
+  for (const sel of document.querySelectorAll('.weapon-select')) {
+    const cards = [...sel.children];
+    for (let i = cards.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      sel.appendChild(cards[j]);
+      [cards[i], cards[j]] = [cards[j], cards[i]];
+    }
+    // Select the first card after shuffle
+    cards.forEach(c => c.classList.remove('selected'));
+    const first = sel.querySelector('.weapon-card');
+    if (first) {
+      first.classList.add('selected');
+      const w = first.dataset.weapon;
+      if (typeof selectWeapon === 'function') selectWeapon(w);
+    }
+  }
+});
+</script>
 <script src="bundle-mp.js"></script>
 </body>
 </html>
