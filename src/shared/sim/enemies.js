@@ -5,11 +5,9 @@
 import { ENEMY_TYPES, enemyType, scaleEnemy } from '../enemyTypes.js';
 import { WORLD_W, WORLD_H } from '../constants.js';
 import { EVT, emit } from './events.js';
-import { pushOutOfObstacles, obstacleAvoidance, buildSpatialHash as buildEntityHash } from './collision.js';
+import { pushOutOfObstacles, obstacleAvoidance } from './collision.js';
 import { enemyShootingAi } from './enemyProjectiles.js';
 import { damageEnemy } from './damage.js';
-import { applyPoisonToPlayer } from './playerStatus.js';
-
 // Reusable zero vector for the no-obstacles path — saves an
 // allocation per enemy per tick on maps without obstacles.
 const ZERO_VEC = { x: 0, y: 0 };
@@ -439,51 +437,6 @@ function updateEnemyTick(g, dt, hash) {
   }
 }
 
-// Contact damage pass — inverts the loop structure from the old embedded
-// per-enemy approach. Players are few (1–4), so we build an entity hash
-// of enemies once and query the 9 cells around each player instead of
-// iterating all enemies for every player. O(players × k) vs O(n × players).
-//
-// Called after repulsion so enemy positions are fully settled. The
-// `break outer` after a hit sets iframes = 0.5 and skips the remaining
-// cells for that player — one hit per player per tick, matching the
-// original behavior.
-function checkEnemyPlayerCollisions(g) {
-  const hash = buildEntityHash(g.enemies);
-  for (const p of g.players) {
-    if (!p.alive || p.iframes > 0) continue;
-    const cx = Math.floor(p.x / HASH_CELL);
-    const cy = Math.floor(p.y / HASH_CELL);
-    outer: for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        const bucket = hash.get((cx + dx) * HASH_KEY_STRIDE + (cy + dy));
-        if (!bucket) continue;
-        for (const e of bucket) {
-          if (e.dying !== undefined) continue;
-          const ex = p.x - e.x, ey = p.y - e.y;
-          if (ex * ex + ey * ey < (p.radius + e.radius) ** 2) {
-            const dmg = Math.max(1, e.damage - (p.armor || 0));
-            p.hp -= dmg;
-            p.iframes = 0.5;
-            emit(g, EVT.PLAYER_HIT, { x: p.x, y: p.y, dmg, by: e.name, pid: p.id });
-            // Poisoner DoT — ignores iframes (status applies even when the
-            // hit is i-framed, since the player still touched the source).
-            if (e.poisonOnHit) {
-              applyPoisonToPlayer(p, e.poisonOnHit.dps, e.poisonOnHit.duration);
-            }
-            if (p.hp <= 0) {
-              p.hp = 0;
-              p.alive = false;
-              emit(g, EVT.PLAYER_DEATH, { x: p.x, y: p.y, by: e.name, pid: p.id });
-            }
-            break outer; // player is now iframed — skip remaining cells
-          }
-        }
-      }
-    }
-  }
-}
-
 // Pass 2: hard overlap correction. Per-type separation in the flock pass
 // already keeps enemies spaced at preferred distances; this pass only
 // fires when sprites actually overlap (sum-of-radii) to prevent visual
@@ -543,7 +496,6 @@ export function updateEnemies(g, dt) {
       if (e.dying === undefined) pushOutOfObstacles(e, g.obstacles);
     }
   }
-  // Contact damage — runs after enemies reach their final positions
-  // so the hash reflects post-repulsion state.
-  checkEnemyPlayerCollisions(g);
+  // Contact damage is handled by checkEnemyPlayerCollisions in collision.js,
+  // called from tick.js after this function with a shared spatial hash.
 }
