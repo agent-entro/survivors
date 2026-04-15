@@ -5,7 +5,7 @@
 import { ENEMY_TYPES, enemyType, scaleEnemy } from '../enemyTypes.js';
 import { WORLD_W, WORLD_H } from '../constants.js';
 import { EVT, emit } from './events.js';
-import { pushOutOfObstacles, obstacleAvoidance } from './collision.js';
+import { pushOutOfObstacles, obstacleAvoidance, buildSpatialHash as buildEntityHash } from './collision.js';
 import { enemyShootingAi } from './enemyProjectiles.js';
 import { damageEnemy } from './damage.js';
 import { applyPoisonToPlayer } from './playerStatus.js';
@@ -436,25 +436,48 @@ function updateEnemyTick(g, dt, hash) {
     }
 
     if (e.hitFlash > 0) e.hitFlash -= dt * 5;
+  }
+}
 
-    // Contact damage — hit every overlapping alive player (not just nearest).
-    for (const p of g.players) {
-      if (!p.alive || p.iframes > 0) continue;
-      const dx = p.x - e.x, dy = p.y - e.y;
-      if (dx * dx + dy * dy < (p.radius + e.radius) ** 2) {
-        const dmg = Math.max(1, e.damage - (p.armor || 0));
-        p.hp -= dmg;
-        p.iframes = 0.5;
-        emit(g, EVT.PLAYER_HIT, { x: p.x, y: p.y, dmg, by: e.name, pid: p.id });
-        // Poisoner DoT — ignores iframes (status applies even when the
-        // hit is i-framed, since the player still touched the source).
-        if (e.poisonOnHit) {
-          applyPoisonToPlayer(p, e.poisonOnHit.dps, e.poisonOnHit.duration);
-        }
-        if (p.hp <= 0) {
-          p.hp = 0;
-          p.alive = false;
-          emit(g, EVT.PLAYER_DEATH, { x: p.x, y: p.y, by: e.name, pid: p.id });
+// Contact damage pass — inverts the loop structure from the old embedded
+// per-enemy approach. Players are few (1–4), so we build an entity hash
+// of enemies once and query the 9 cells around each player instead of
+// iterating all enemies for every player. O(players × k) vs O(n × players).
+//
+// Called after repulsion so enemy positions are fully settled. The
+// `break outer` after a hit sets iframes = 0.5 and skips the remaining
+// cells for that player — one hit per player per tick, matching the
+// original behavior.
+function checkEnemyPlayerCollisions(g) {
+  const hash = buildEntityHash(g.enemies);
+  for (const p of g.players) {
+    if (!p.alive || p.iframes > 0) continue;
+    const cx = Math.floor(p.x / HASH_CELL);
+    const cy = Math.floor(p.y / HASH_CELL);
+    outer: for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const bucket = hash.get((cx + dx) * HASH_KEY_STRIDE + (cy + dy));
+        if (!bucket) continue;
+        for (const e of bucket) {
+          if (e.dying !== undefined) continue;
+          const ex = p.x - e.x, ey = p.y - e.y;
+          if (ex * ex + ey * ey < (p.radius + e.radius) ** 2) {
+            const dmg = Math.max(1, e.damage - (p.armor || 0));
+            p.hp -= dmg;
+            p.iframes = 0.5;
+            emit(g, EVT.PLAYER_HIT, { x: p.x, y: p.y, dmg, by: e.name, pid: p.id });
+            // Poisoner DoT — ignores iframes (status applies even when the
+            // hit is i-framed, since the player still touched the source).
+            if (e.poisonOnHit) {
+              applyPoisonToPlayer(p, e.poisonOnHit.dps, e.poisonOnHit.duration);
+            }
+            if (p.hp <= 0) {
+              p.hp = 0;
+              p.alive = false;
+              emit(g, EVT.PLAYER_DEATH, { x: p.x, y: p.y, by: e.name, pid: p.id });
+            }
+            break outer; // player is now iframed — skip remaining cells
+          }
         }
       }
     }
@@ -520,4 +543,7 @@ export function updateEnemies(g, dt) {
       if (e.dying === undefined) pushOutOfObstacles(e, g.obstacles);
     }
   }
+  // Contact damage — runs after enemies reach their final positions
+  // so the hash reflects post-repulsion state.
+  checkEnemyPlayerCollisions(g);
 }

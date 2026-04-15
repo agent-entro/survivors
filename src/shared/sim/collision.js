@@ -66,6 +66,32 @@ export function pushOutOfObstacles(circle, obstacles) {
 // we're overlapping one (pushOut couldn't fully resolve in a single
 // tick), we push straight backward along −velocity so the entity
 // retreats rather than grinding against the rect.
+// Spatial hash for circle-vs-circle proximity queries. Entities that share
+// a cell (or are in adjacent cells) are collision candidates; distant
+// entities are skipped entirely. Cell size matches the flock perception
+// radius so 9-cell neighbor scans cover the full interaction range.
+//
+// Stores entity *objects* (not indices) — use for collision checks that
+// need direct field access. The index-based variant in enemies.js is kept
+// separate because flock/repulsion require pair-dedup via index arithmetic.
+export const HASH_CELL = 150;
+export const HASH_KEY_STRIDE = 100000;
+
+// Returns Map<number, Entity[]>. Query: for each neighbor cell
+// `(cx+dx, cy+dy)` where dx,dy ∈ {-1,0,1}, call `map.get(key)`.
+export function buildSpatialHash(entities) {
+  const cells = new Map();
+  for (const e of entities) {
+    const cx = Math.floor(e.x / HASH_CELL);
+    const cy = Math.floor(e.y / HASH_CELL);
+    const k = cx * HASH_KEY_STRIDE + cy;
+    let bucket = cells.get(k);
+    if (!bucket) { bucket = []; cells.set(k, bucket); }
+    bucket.push(e);
+  }
+  return cells;
+}
+
 export function obstacleAvoidance(x, y, vx, vy, obstacles, lookAhead) {
   const speed = Math.hypot(vx, vy);
   if (speed < 0.001) return { x: 0, y: 0 };
