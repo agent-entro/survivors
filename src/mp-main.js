@@ -5,6 +5,9 @@
 // ============================================================
 
 import { WEAPON_ICONS } from './shared/weapons.js';
+import { sfx, setSfxVol as _setSfxVol, getSfxVol, getAudioCtx as getAudio } from './shared/sfx.js';
+import { installKeyboardInput } from './shared/input.js';
+import { makeBgmPlayer } from './shared/bgm.js';
 import { escapeHTML } from './shared/htmlEscape.js';
 import { buildBackgroundCanvas } from './shared/tileBackground.js';
 import { loadObstacleSprites, drawObstacle, drawNeonBackground } from './shared/obstacleSprites.js';
@@ -25,6 +28,138 @@ const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 ctx.imageSmoothingEnabled = false;
 
+// Minimap overlay — fixed bottom-right, MP-only spatial awareness for
+// 8-player games. Pure client; reads from currState which renderWorld
+// is already drawing from.
+const mmCanvas = document.createElement('canvas');
+const MM = 140;
+// mmBorderUntil: performance.now() timestamp until which the minimap
+// border should pulse red — set by the bossPhase phase-3 event.
+let mmBorderUntil = 0;
+mmCanvas.width = mmCanvas.height = MM;
+Object.assign(mmCanvas.style, {
+  position: 'fixed', bottom: '12px', right: '12px',
+  width: MM + 'px', height: MM + 'px',
+  borderRadius: '4px', pointerEvents: 'none', zIndex: '50',
+});
+document.body.appendChild(mmCanvas);
+const mmCtx = mmCanvas.getContext('2d');
+
+function drawMinimap() {
+  if (!currState) return;
+  const { players = [], enemies = [], gems = [], consumables = [] } = currState;
+  const aw = (arena && arena.w) || 3000;
+  const ah = (arena && arena.h) || 3000;
+  const sx = MM / aw, sy = MM / ah;
+
+  mmCtx.clearRect(0, 0, MM, MM);
+  mmCtx.fillStyle = 'rgba(0,0,0,0.55)';
+  mmCtx.fillRect(0, 0, MM, MM);
+
+  // Trash gems as tiny blue pixels; tier-1 (elite) get purple,
+  // tier-2 (boss) get bigger gold dots so players spot high-value
+  // pickups across the map.
+  for (const g of gems) {
+    if (g.tier === 2) {
+      mmCtx.fillStyle = '#f1c40f';
+      mmCtx.fillRect(g.x * sx - 1, g.y * sy - 1, 2, 2);
+    } else if (g.tier === 1) {
+      mmCtx.fillStyle = '#9b59b6';
+      mmCtx.fillRect(g.x * sx - 0.5, g.y * sy - 0.5, 1.5, 1.5);
+    } else {
+      mmCtx.fillStyle = '#5dade2';
+      mmCtx.fillRect(g.x * sx - 0.5, g.y * sy - 0.5, 1, 1);
+    }
+  }
+
+  // Enemies — gray dots for trash mobs, scaled colored dots for
+  // named threats (brute/elite/spawner/boss) so players can locate
+  // bigger enemies at a glance. Boss adds a pulsing halo since
+  // bosses fire ranged spreads now and you want to know where it
+  // is without panning.
+  for (const e of enemies) {
+    if (e.name === 'boss') {
+      mmCtx.fillStyle = e.color || '#d63031';
+      mmCtx.beginPath();
+      mmCtx.arc(e.x * sx, e.y * sy, 4, 0, Math.PI * 2);
+      mmCtx.fill();
+      const bossPulse = 0.4 + Math.sin(performance.now() / 180) * 0.3;
+      mmCtx.strokeStyle = e.color || '#d63031';
+      mmCtx.globalAlpha = bossPulse;
+      mmCtx.lineWidth = 1;
+      mmCtx.beginPath();
+      mmCtx.arc(e.x * sx, e.y * sy, 7, 0, Math.PI * 2);
+      mmCtx.stroke();
+      mmCtx.globalAlpha = 1;
+    } else if (e.name === 'elite' || e.name === 'spawner' || e.name === 'brute') {
+      mmCtx.fillStyle = e.color || '#888';
+      mmCtx.beginPath();
+      mmCtx.arc(e.x * sx, e.y * sy, 2.5, 0, Math.PI * 2);
+      mmCtx.fill();
+    } else {
+      mmCtx.fillStyle = '#888';
+      mmCtx.beginPath();
+      mmCtx.arc(e.x * sx, e.y * sy, 1.5, 0, Math.PI * 2);
+      mmCtx.fill();
+    }
+  }
+
+  // Consumables — rare drops (boss 50%, elite 6%, brute 4%). Pulse
+  // with a halo so players actually spot them across the map; use
+  // the consumable color so bomb/shield/magnet are distinguishable
+  // at a glance.
+  if (consumables.length > 0) {
+    const pulse = 0.6 + Math.sin(performance.now() / 200) * 0.4;
+    for (const c of consumables) {
+      const cx = c.x * sx, cy = c.y * sy;
+      mmCtx.fillStyle = c.color || '#f39c12';
+      mmCtx.beginPath();
+      mmCtx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+      mmCtx.fill();
+      mmCtx.strokeStyle = c.color || '#f39c12';
+      mmCtx.globalAlpha = pulse;
+      mmCtx.lineWidth = 1;
+      mmCtx.beginPath();
+      mmCtx.arc(cx, cy, 5, 0, Math.PI * 2);
+      mmCtx.stroke();
+      mmCtx.globalAlpha = 1;
+    }
+  }
+
+  for (const p of players) {
+    if (!p.alive) continue;
+    const mx = p.x * sx, my = p.y * sy;
+    const isYou = p.id === myId;
+    const r = isYou ? 4 : 3;
+    mmCtx.fillStyle = p.color || '#ffffff';
+    mmCtx.beginPath();
+    mmCtx.arc(mx, my, r, 0, Math.PI * 2);
+    mmCtx.fill();
+    if (isYou) {
+      mmCtx.strokeStyle = '#ffffff';
+      mmCtx.lineWidth = 1;
+      mmCtx.beginPath();
+      mmCtx.arc(mx, my, r + 2, 0, Math.PI * 2);
+      mmCtx.stroke();
+    }
+  }
+
+  // Minimap border — flashes red on boss phase-3 transition, then
+  // fades back to the standard dim white over the flash duration.
+  const now = performance.now();
+  const borderFlashAlpha = mmBorderUntil > now
+    ? Math.min(0.9, (mmBorderUntil - now) / 600) // fade out over 600 ms
+    : 0;
+  if (borderFlashAlpha > 0) {
+    mmCtx.strokeStyle = `rgba(220,40,40,${borderFlashAlpha})`;
+    mmCtx.lineWidth = 2;
+    mmCtx.strokeRect(1, 1, MM - 2, MM - 2);
+  }
+  mmCtx.strokeStyle = `rgba(255,255,255,${0.3 - borderFlashAlpha * 0.2})`;
+  mmCtx.lineWidth = 1;
+  mmCtx.strokeRect(0.5, 0.5, MM - 1, MM - 1);
+}
+
 // --- sprite sheet ---
 const spriteSheet = new Image();
 spriteSheet.src = 'sprites.png';
@@ -33,198 +168,57 @@ spriteSheet.onload = () => { spritesReady = true; };
 
 const drawSprite = makeDrawSprite(ctx, spriteSheet, () => spritesReady);
 
-// --- sound effects (Web Audio API) ---
-let audioCtx = null;
-function getAudio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  return audioCtx;
-}
-
-function sfx(type) {
-  try {
-    const ac = getAudio();
-    const t = ac.currentTime;
-    const osc = ac.createOscillator();
-    const gain = ac.createGain();
-    osc.connect(gain);
-    gain.connect(ac.destination);
-
-    switch (type) {
-      case 'hit':
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(220, t);
-        osc.frequency.linearRampToValueAtTime(110, t + 0.06);
-        gain.gain.setValueAtTime(0.08, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.06);
-        osc.start(t); osc.stop(t + 0.06);
-        break;
-      case 'kill':
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(400, t);
-        osc.frequency.linearRampToValueAtTime(800, t + 0.08);
-        gain.gain.setValueAtTime(0.12, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.1);
-        osc.start(t); osc.stop(t + 0.1);
-        break;
-      case 'xp':
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(880, t);
-        osc.frequency.linearRampToValueAtTime(1320, t + 0.06);
-        gain.gain.setValueAtTime(0.06, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.08);
-        osc.start(t); osc.stop(t + 0.08);
-        break;
-      case 'levelup': {
-        gain.gain.setValueAtTime(0, t);
-        osc.start(t); osc.stop(t + 0.01);
-        const notes = [523, 659, 784, 1047];
-        notes.forEach((freq, i) => {
-          const o = ac.createOscillator();
-          const g = ac.createGain();
-          o.connect(g); g.connect(ac.destination);
-          o.type = 'triangle';
-          o.frequency.setValueAtTime(freq, t + i * 0.08);
-          g.gain.setValueAtTime(0.1, t + i * 0.08);
-          g.gain.linearRampToValueAtTime(0, t + i * 0.08 + 0.12);
-          o.start(t + i * 0.08);
-          o.stop(t + i * 0.08 + 0.12);
-        });
-        break;
-      }
-      case 'playerhit':
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(150, t);
-        osc.frequency.linearRampToValueAtTime(80, t + 0.12);
-        gain.gain.setValueAtTime(0.15, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.15);
-        osc.start(t); osc.stop(t + 0.15);
-        break;
-      case 'death': {
-        gain.gain.setValueAtTime(0, t);
-        osc.start(t); osc.stop(t + 0.01);
-        const freqs = [440, 330, 220, 110];
-        freqs.forEach((freq, i) => {
-          const o = ac.createOscillator();
-          const g = ac.createGain();
-          o.connect(g); g.connect(ac.destination);
-          o.type = 'sawtooth';
-          o.frequency.setValueAtTime(freq, t + i * 0.15);
-          o.frequency.linearRampToValueAtTime(freq * 0.7, t + i * 0.15 + 0.15);
-          g.gain.setValueAtTime(0.12, t + i * 0.15);
-          g.gain.linearRampToValueAtTime(0, t + i * 0.15 + 0.18);
-          o.start(t + i * 0.15);
-          o.stop(t + i * 0.15 + 0.18);
-        });
-        break;
-      }
-      case 'spit':
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(600, t);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.07);
-        gain.gain.setValueAtTime(0.05, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.07);
-        osc.start(t); osc.stop(t + 0.07);
-        break;
-      case 'chain':
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(1200, t);
-        osc.frequency.linearRampToValueAtTime(300, t + 0.05);
-        osc.frequency.linearRampToValueAtTime(900, t + 0.08);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.12);
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.12);
-        osc.start(t); osc.stop(t + 0.12);
-        break;
-      case 'meteor':
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(60, t);
-        osc.frequency.linearRampToValueAtTime(40, t + 0.2);
-        gain.gain.setValueAtTime(0.18, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.25);
-        osc.start(t); osc.stop(t + 0.25);
-        break;
-      case 'dragonstorm': {
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(100, t);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.1);
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.15);
-        osc.start(t); osc.stop(t + 0.15);
-        const o2 = ac.createOscillator();
-        const g2 = ac.createGain();
-        o2.connect(g2); g2.connect(ac.destination);
-        o2.type = 'square';
-        o2.frequency.setValueAtTime(800, t + 0.03);
-        o2.frequency.linearRampToValueAtTime(400, t + 0.1);
-        g2.gain.setValueAtTime(0.06, t + 0.03);
-        g2.gain.linearRampToValueAtTime(0, t + 0.12);
-        o2.start(t + 0.03); o2.stop(t + 0.12);
-        break;
-      }
-      default:
-        gain.gain.setValueAtTime(0, t);
-        osc.start(t); osc.stop(t + 0.01);
-    }
-  } catch (e) { /* audio not available */ }
-}
-
+// sfx() + audio context + master gain live in shared/sfx.js. MP
+// gains the sfx types it was previously missing (charge, hive_burst,
+// shield_hum, zap, heal, boss_step, boss_telegraph) since the
+// switch is now one source of truth.
+//
 // --- battle music (map-aware + mute toggle) ---
 const MP_MAP_TRACKS = { arena: 'arena_theme.ogg', neon: 'neon_grid.ogg', forest: 'forest_theme.ogg', graveyard: 'graveyard_theme.ogg', ruins: 'ruins_theme.ogg' };
 const MP_DEFAULT_TRACK = 'survivors_battle.ogg';
-const MP_MUSIC_VOL = 0.35;
-let mpBgMusic = null;
-let mpBgMusicGain = null;
-let mpMusicFading = false;
-let mpCurrentTrack = null;
+// SFX vol lives in the shared module now — only BGM stays local.
+let mpBgmVol = 0.45;
+try { const v = localStorage.getItem('survivors_bgm_vol'); if (v !== null) mpBgmVol = +v; } catch (_) {}
+const mpBattlePlayer = makeBgmPlayer();
 let mpMusicMuted = false;
 try { mpMusicMuted = localStorage.getItem('survivors_mute') === '1'; } catch (_) {}
 function updateMpMuteBtn() {
   const b = document.getElementById('mute-btn');
   if (b) b.textContent = mpMusicMuted ? '🔇' : '🔊';
 }
+function initMpVolSliders() {
+  const bs = document.getElementById('vol-bgm');
+  const ss = document.getElementById('vol-sfx');
+  if (bs) bs.value = Math.round(mpBgmVol * 100);
+  if (ss) ss.value = Math.round(getSfxVol() * 100);
+}
 updateMpMuteBtn();
+initMpVolSliders();
+
+function setBgmVol(v) {
+  mpBgmVol = Math.max(0, Math.min(1, v / 100));
+  try { localStorage.setItem('survivors_bgm_vol', mpBgmVol.toFixed(2)); } catch (_) {}
+  if (!mpMusicMuted) mpBattlePlayer.setVol(mpBgmVol);
+}
+function setSfxVol(v) {
+  // Slider is 0..100; shared module owns persistence + gain wiring.
+  _setSfxVol(Math.max(0, Math.min(1, v / 100)));
+}
+function toggleVolPanel() {
+  const p = document.getElementById('vol-panel');
+  if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
+}
 
 function startMpMusic(mapId) {
-  try {
-    const ac = getAudio();
-    if (ac.state === 'suspended') ac.resume();
-    const src = MP_MAP_TRACKS[mapId] || MP_DEFAULT_TRACK;
-    if (mpBgMusic && mpCurrentTrack !== src) {
-      mpBgMusic.pause(); mpBgMusic = null; mpBgMusicGain = null;
-    }
-    if (!mpBgMusic) {
-      mpBgMusic = new Audio();
-      mpBgMusic.loop = true;
-      mpBgMusic.volume = 1;
-      mpBgMusic.src = src;
-      mpCurrentTrack = src;
-      const mediaSrc = ac.createMediaElementSource(mpBgMusic);
-      mpBgMusicGain = ac.createGain();
-      mpBgMusicGain.gain.value = 0;
-      mediaSrc.connect(mpBgMusicGain);
-      mpBgMusicGain.connect(ac.destination);
-    }
-    mpBgMusic.currentTime = 0;
-    mpBgMusic.play().catch(() => {});
-    const target = mpMusicMuted ? 0 : MP_MUSIC_VOL;
-    mpBgMusicGain.gain.cancelScheduledValues(ac.currentTime);
-    mpBgMusicGain.gain.setValueAtTime(0, ac.currentTime);
-    mpBgMusicGain.gain.linearRampToValueAtTime(target, ac.currentTime + 2);
-    mpMusicFading = false;
-  } catch (_) {}
+  const src = MP_MAP_TRACKS[mapId] || MP_DEFAULT_TRACK;
+  mpBattlePlayer.play(src, mpMusicMuted ? 0 : mpBgmVol);
 }
 
 function toggleMpMute() {
   mpMusicMuted = !mpMusicMuted;
   try { localStorage.setItem('survivors_mute', mpMusicMuted ? '1' : '0'); } catch (_) {}
   updateMpMuteBtn();
-  if (mpBgMusicGain) {
-    try {
-      const ac = getAudio();
-      mpBgMusicGain.gain.cancelScheduledValues(ac.currentTime);
-      mpBgMusicGain.gain.linearRampToValueAtTime(mpMusicMuted ? 0 : MP_MUSIC_VOL, ac.currentTime + 0.3);
-    } catch (_) {}
-  }
+  mpBattlePlayer.setVol(mpMusicMuted ? 0 : mpBgmVol, 0.3);
 }
 
 // --- resize ---
@@ -281,13 +275,24 @@ const mpEventClient = {
   // falls through to sfx('levelup') and the leveling player hears
   // the cue twice.
   onLevelUp: () => {},
-  // onPlayerDeath: DOM flip handled in processStateChanges for now
-  // (needs the `me` snapshot object that event alone doesn't carry).
+  // Pulse the minimap border red for `dur` seconds — called by the
+  // bossPhase phase-3 handler in simEventHandler.
+  minimapBorderFlash(dur) { mmBorderUntil = performance.now() + dur * 1000; },
+  // Death-screen DOM flip — only the local player. Event has pid;
+  // we look me up on currState (set just before this event drains
+  // so it's the same snapshot the death came from).
+  onPlayerDeath(evt) {
+    if (evt.pid !== myId || !currState) return;
+    const me = currState.players.find(p => p.id === myId);
+    if (me) showDeathScreen(currState, me);
+    iDied = true;
+  },
 };
 
-// Only tracked for the death-screen DOM flip — every other change
-// signal comes through the event channel now.
-let prevMyAlive = null;
+// Set true on local-player death event, cleared on join/respawn.
+// startGame() reads this to choose join vs respawn for the same
+// PLAY/RETRY button.
+let iDied = false;
 
 // Camera
 let camera = { x: 1500, y: 1500 };
@@ -375,10 +380,6 @@ function connectWS() {
         for (const id of trailState.keys()) if (!live.has(id)) trailState.delete(id);
       }
 
-      // Death screen trigger still lives here since it's a DOM flip,
-      // not a transient effect. Level-up menu also stays — server
-      // sends separate `levelup` with choices.
-      processStateChanges(msg);
       return;
     }
 
@@ -426,17 +427,6 @@ function showLevelUpChoices(choices) {
   }, 10000);
 }
 
-function processStateChanges(state) {
-  const me = state.players.find(p => p.id === myId);
-  if (!me) return;
-
-  // Death-screen DOM flip — stays here because event drain happens
-  // before DOM work and we need the latest state object for the
-  // showDeathScreen call.
-  if (prevMyAlive === true && !me.alive) showDeathScreen(state, me);
-
-  prevMyAlive = me.alive;
-}
 
 function sendInput() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -457,6 +447,7 @@ function joinGame() {
   const nameInput = document.getElementById('name-input');
   const name = (nameInput.value || '').trim().slice(0, 12) || 'player';
   myName = name;
+  iDied = false;
 
   document.getElementById('start-screen').style.display = 'none';
   document.getElementById('death-screen').style.display = 'none';
@@ -494,7 +485,7 @@ function respawnGame() {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'respawn', weapon: selectedWeapon, prestige: prestigePayload() }));
   }
-  prevMyAlive = null;
+  iDied = false;
 }
 
 function showDeathScreen(state, me) {
@@ -840,37 +831,26 @@ function render(dt) {
       if (xpFill) xpFill.style.width = `${Math.min(100, (me.xp / me.xpToLevel) * 100)}%`;
     }
   }
+
+  drawMinimap();
 }
 
 // ============================================================
 // INPUT
 // ============================================================
 
-const KEY_MAP = {
-  'w': 'up', 'arrowup': 'up',
-  's': 'down', 'arrowdown': 'down',
-  'a': 'left', 'arrowleft': 'left',
-  'd': 'right', 'arrowright': 'right',
-};
-
-document.addEventListener('keydown', e => {
-  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
-  // Number keys 1-3 pick a level-up choice when the overlay is open.
-  // The handlers in window._levelChoices send the `choose` message and
-  // hide the overlay themselves.
-  if (window._levelChoices && window._levelChoices.length > 0 && /^[1-3]$/.test(e.key)) {
-    const idx = Number(e.key) - 1;
+// Keyboard handlers + KEY_MAP live in shared/input.js. Level-up
+// callback gates on the per-mode overlay state — MP uses the
+// server-driven _levelChoices array (sent via the `levelup`
+// message after a level-up event).
+installKeyboardInput(keys, {
+  onLevelUpKey(idx) {
+    if (!window._levelChoices) return false;
     const pick = window._levelChoices[idx];
-    if (pick) { pick(); e.preventDefault(); return; }
-  }
-  const k = KEY_MAP[e.key.toLowerCase()];
-  if (k) { keys[k] = true; e.preventDefault(); }
-});
-
-document.addEventListener('keyup', e => {
-  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
-  const k = KEY_MAP[e.key.toLowerCase()];
-  if (k) { keys[k] = false; e.preventDefault(); }
+    if (!pick) return false;
+    pick();
+    return true;
+  },
 });
 
 // Keyboard shortcuts for start/death screens
@@ -978,9 +958,12 @@ window.addEventListener('load', () => {
 // Expose handlers used by inline HTML.
 // Both PLAY and RETRY use `onclick="startGame()"` in template.html — alias
 // to joinGame on first press, respawnGame after death.
-window.startGame = () => (renderStarted && prevMyAlive === false ? respawnGame() : joinGame());
+window.startGame = () => (renderStarted && iDied ? respawnGame() : joinGame());
 window.selectWeapon = selectWeapon;
 window.toggleMute = toggleMpMute;
+window.setBgmVol = setBgmVol;
+window.setSfxVol = setSfxVol;
+window.toggleVolPanel = toggleVolPanel;
 window.showBestiary = showBestiary;
 window.hideBestiary = hideBestiary;
 

@@ -4,6 +4,7 @@
 // METEOR_EXPLODE, SHIELD_HUM, CHARGE_BURST events.
 import { EVT, emit } from './events.js';
 import { damageEnemy } from './damage.js';
+import { applyStatus } from './enemies.js';
 
 // Random-N enemies inside a circular range, drawn via Fisher-Yates so
 // the choice tracks g.rng deterministically. Used by lightning_field +
@@ -70,11 +71,31 @@ function fireCharge(g, w, p) {
   w.chargeTimer = w.duration;
   w.chargeDx = f.x / d;
   w.chargeDy = f.y / d;
+  const startX = p.x, startY = p.y;
   p.x += w.chargeDx * w.speed * w.duration;
   p.y += w.chargeDy * w.speed * w.duration;
   p.x = Math.max(p.radius, Math.min(g.arena.w - p.radius, p.x));
   p.y = Math.max(p.radius, Math.min(g.arena.h - p.radius, p.y));
   emit(g, EVT.CHARGE_BURST, { x: p.x, y: p.y, color: w.color, pid: p.id });
+  // Fire wake — drop damage zones along the dash path. Enemies
+  // that walk through the trail take half charge damage per tick.
+  // Rewards aggressive pathing through enemy packs.
+  if (!g.chargeTrails) g.chargeTrails = [];
+  const trailDist = Math.hypot(p.x - startX, p.y - startY);
+  const zones = Math.max(3, Math.floor(trailDist / 30));
+  const effectiveWidth = w.width * (p.sizeMulti || 1);
+  for (let i = 0; i <= zones; i++) {
+    const t = i / zones;
+    g.chargeTrails.push({
+      x: startX + (p.x - startX) * t,
+      y: startY + (p.y - startY) * t,
+      radius: effectiveWidth * 0.6,
+      damage: w.damage * 0.5 * (p.damageMulti || 1),
+      life: 1.0,     // 1 second lingering trail
+      owner: p.id,
+      color: w.color,
+    });
+  }
 }
 
 function fireChain(g, w, p) {
@@ -104,6 +125,7 @@ function fireChain(g, w, p) {
   for (const t of targets) {
     chainPoints.push({ x: t.x, y: t.y });
     damageEnemy(g, t, w.damage * p.damageMulti, p.id);
+    applyStatus(g, t, { type: 'slow', remaining: 2.0, magnitude: 0.4, tickRate: 0 });
   }
   g.chainEffects.push({ points: chainPoints, life: 0.2, color: w.color });
 }
@@ -147,6 +169,8 @@ function fireDragonStorm(g, w, p) {
       speed: w.speed, damage: w.damage, range: w.range,
       dist: 0, pierce: w.pierce, radius: 7, color: w.color,
       owner: p.id,
+      // Burn applied per hit in projectiles.js via statusOnHit.
+      statusOnHit: { type: 'burn', remaining: 3.0, magnitude: 8, tickRate: 0.5 },
     });
   }
 }
@@ -232,6 +256,7 @@ function tickLightningField(g, w, p) {
   const targets = randomEnemiesInRange(g, p.x, p.y, effectiveRadius, zapCount);
   for (const t of targets) {
     damageEnemy(g, t, w.damage * p.damageMulti, p.id);
+    applyStatus(g, t, { type: 'slow', remaining: 1.5, magnitude: 0.4, tickRate: 0 });
     g.chainEffects.push({ points: [{ x: p.x, y: p.y }, { x: t.x, y: t.y }], life: 0.15, color: w.color });
   }
   if (targets.length > 0) emit(g, EVT.CHAIN_ZAP, { weapon: 'lightning_field', pid: p.id });
@@ -408,7 +433,7 @@ function fortressShockwave(g, w, p) {
     damage: 0, life: 0.25, phase: 'explode',
     color: w.color, owner: p.id,
   });
-  emit(g, EVT.METEOR_EXPLODE, { x: p.x, y: p.y, color: w.color, radius: w.shockwaveRadius });
+  emit(g, EVT.METEOR_EXPLODE, { x: p.x, y: p.y, color: w.color, radius: w.shockwaveRadius, pid: p.id });
 }
 
 // --- chain + meteor effect lifetimes ---
@@ -419,6 +444,26 @@ export function updateChainEffects(g, dt) {
   }
 }
 
+// Charge fire-wake trails. Lingering damage zones left behind a Bull
+// Rush dash. Enemies walking through take half charge damage per tick
+// for 1 second. Rewards aggressive pathing through enemy packs.
+export function updateChargeTrails(g, dt) {
+  if (!g.chargeTrails) return;
+  for (let i = g.chargeTrails.length - 1; i >= 0; i--) {
+    const t = g.chargeTrails[i];
+    t.life -= dt;
+    if (t.life <= 0) { g.chargeTrails.splice(i, 1); continue; }
+    // Damage enemies overlapping this zone — per-tick dot, not burst.
+    for (const e of g.enemies) {
+      if (e.dying !== undefined) continue;
+      const dx = e.x - t.x, dy = e.y - t.y;
+      if (dx * dx + dy * dy < (t.radius + e.radius) ** 2) {
+        damageEnemy(g, e, t.damage * dt, t.owner);
+      }
+    }
+  }
+}
+
 export function updateMeteorEffects(g, dt) {
   for (let i = g.meteorEffects.length - 1; i >= 0; i--) {
     const m = g.meteorEffects[i];
@@ -426,12 +471,14 @@ export function updateMeteorEffects(g, dt) {
     if (m.phase === 'warn' && m.life <= 0) {
       m.phase = 'explode';
       m.life = 0.3;
-      emit(g, EVT.METEOR_EXPLODE, { x: m.x, y: m.y, color: m.color, radius: m.radius });
+      emit(g, EVT.METEOR_EXPLODE, { x: m.x, y: m.y, color: m.color, radius: m.radius, pid: m.owner });
       for (let j = g.enemies.length - 1; j >= 0; j--) {
         const e = g.enemies[j];
         const dx = m.x - e.x, dy = m.y - e.y;
         if (dx * dx + dy * dy < (m.radius + e.radius) ** 2) {
           damageEnemy(g, g.enemies[j], m.damage, m.owner);
+          // Meteor freeze — hard landing stuns enemies in the blast zone.
+          if (m.damage > 0) applyStatus(g, e, { type: 'freeze', remaining: 1.5, magnitude: 0, tickRate: 0 });
         }
       }
     } else if (m.phase === 'explode' && m.life <= 0) {

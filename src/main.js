@@ -4,6 +4,9 @@
 // ============================================================
 
 import { WORLD_W, WORLD_H, PLAYER_SPEED, PLAYER_RADIUS, PLAYER_MAX_HP, XP_MAGNET_RANGE, XP_MAGNET_SPEED } from './shared/constants.js';
+import { sfx, setSfxVol as _setSfxVol, getSfxVol, getAudioCtx as getAudio } from './shared/sfx.js';
+import { installKeyboardInput } from './shared/input.js';
+import { makeBgmPlayer } from './shared/bgm.js';
 import { WEAPON_ICONS, createWeapon } from './shared/weapons.js';
 import { createRng } from './shared/sim/rng.js';
 import { EVT } from './shared/sim/events.js';
@@ -50,263 +53,10 @@ spriteSheet.onload = () => { spritesReady = true; };
 const drawSprite = makeDrawSprite(ctx, spriteSheet, () => spritesReady);
 
 // --- sound effects (Web Audio API) ---
-let audioCtx = null;
-function getAudio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  return audioCtx;
-}
-
-function sfx(type) {
-  try {
-    const ac = getAudio();
-    const t = ac.currentTime;
-    const osc = ac.createOscillator();
-    const gain = ac.createGain();
-    osc.connect(gain);
-    gain.connect(ac.destination);
-
-    switch (type) {
-      case 'hit': // enemy takes damage — short blip
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(220, t);
-        osc.frequency.linearRampToValueAtTime(110, t + 0.06);
-        gain.gain.setValueAtTime(0.08, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.06);
-        osc.start(t); osc.stop(t + 0.06);
-        break;
-
-      case 'kill': // enemy dies — satisfying pop
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(400, t);
-        osc.frequency.linearRampToValueAtTime(800, t + 0.08);
-        gain.gain.setValueAtTime(0.12, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.1);
-        osc.start(t); osc.stop(t + 0.1);
-        break;
-
-      case 'xp': // gem pickup — tiny chime
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(880, t);
-        osc.frequency.linearRampToValueAtTime(1320, t + 0.06);
-        gain.gain.setValueAtTime(0.06, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.08);
-        osc.start(t); osc.stop(t + 0.08);
-        break;
-
-      case 'levelup': { // level up — ascending arpeggio
-        gain.gain.setValueAtTime(0, t); // silence main osc
-        osc.start(t); osc.stop(t + 0.01);
-        const notes = [523, 659, 784, 1047]; // C5 E5 G5 C6
-        notes.forEach((freq, i) => {
-          const o = ac.createOscillator();
-          const g = ac.createGain();
-          o.connect(g); g.connect(ac.destination);
-          o.type = 'triangle';
-          o.frequency.setValueAtTime(freq, t + i * 0.08);
-          g.gain.setValueAtTime(0.1, t + i * 0.08);
-          g.gain.linearRampToValueAtTime(0, t + i * 0.08 + 0.12);
-          o.start(t + i * 0.08);
-          o.stop(t + i * 0.08 + 0.12);
-        });
-        break;
-      }
-
-      case 'playerhit': // player takes damage — harsh buzz
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(150, t);
-        osc.frequency.linearRampToValueAtTime(80, t + 0.12);
-        gain.gain.setValueAtTime(0.15, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.15);
-        osc.start(t); osc.stop(t + 0.15);
-        break;
-
-      case 'death': { // player death — descending doom
-        gain.gain.setValueAtTime(0, t);
-        osc.start(t); osc.stop(t + 0.01);
-        const freqs = [440, 330, 220, 110];
-        freqs.forEach((freq, i) => {
-          const o = ac.createOscillator();
-          const g = ac.createGain();
-          o.connect(g); g.connect(ac.destination);
-          o.type = 'sawtooth';
-          o.frequency.setValueAtTime(freq, t + i * 0.15);
-          o.frequency.linearRampToValueAtTime(freq * 0.7, t + i * 0.15 + 0.15);
-          g.gain.setValueAtTime(0.12, t + i * 0.15);
-          g.gain.linearRampToValueAtTime(0, t + i * 0.15 + 0.18);
-          o.start(t + i * 0.15);
-          o.stop(t + i * 0.15 + 0.18);
-        });
-        break;
-      }
-
-      case 'spit': // projectile fire — pew
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(600, t);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.07);
-        gain.gain.setValueAtTime(0.05, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.07);
-        osc.start(t); osc.stop(t + 0.07);
-        break;
-
-      case 'chain': // chain lightning — electric zap
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(1200, t);
-        osc.frequency.linearRampToValueAtTime(300, t + 0.05);
-        osc.frequency.linearRampToValueAtTime(900, t + 0.08);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.12);
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.12);
-        osc.start(t); osc.stop(t + 0.12);
-        break;
-
-      case 'meteor': // meteor drop — deep rumble whomp
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(60, t);
-        osc.frequency.linearRampToValueAtTime(40, t + 0.2);
-        gain.gain.setValueAtTime(0.18, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.25);
-        osc.start(t); osc.stop(t + 0.25);
-        break;
-
-      case 'dragonstorm': { // dragon storm — deep roar + high sizzle
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(100, t);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.1);
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.15);
-        osc.start(t); osc.stop(t + 0.15);
-        const o2 = ac.createOscillator();
-        const g2 = ac.createGain();
-        o2.connect(g2); g2.connect(ac.destination);
-        o2.type = 'square';
-        o2.frequency.setValueAtTime(800, t + 0.03);
-        o2.frequency.linearRampToValueAtTime(400, t + 0.1);
-        g2.gain.setValueAtTime(0.06, t + 0.03);
-        g2.gain.linearRampToValueAtTime(0, t + 0.12);
-        o2.start(t + 0.03); o2.stop(t + 0.12);
-        break;
-      }
-
-      case 'charge': { // bull rush — woosh + impact thud
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(150, t);
-        osc.frequency.linearRampToValueAtTime(300, t + 0.08);
-        osc.frequency.linearRampToValueAtTime(80, t + 0.15);
-        gain.gain.setValueAtTime(0.15, t);
-        gain.gain.linearRampToValueAtTime(0.08, t + 0.08);
-        gain.gain.linearRampToValueAtTime(0, t + 0.2);
-        osc.start(t); osc.stop(t + 0.2);
-        break;
-      }
-
-      case 'hive_burst': { // spawner births swarmlings — organic squelchy burst
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(180, t);
-        osc.frequency.linearRampToValueAtTime(90, t + 0.08);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.12);
-        osc.frequency.linearRampToValueAtTime(60, t + 0.2);
-        gain.gain.setValueAtTime(0.12, t);
-        gain.gain.linearRampToValueAtTime(0.08, t + 0.08);
-        gain.gain.linearRampToValueAtTime(0, t + 0.2);
-        osc.start(t); osc.stop(t + 0.2);
-        // high squelch layer
-        const hb2 = ac.createOscillator();
-        const hg2 = ac.createGain();
-        hb2.connect(hg2); hg2.connect(ac.destination);
-        hb2.type = 'square';
-        hb2.frequency.setValueAtTime(500, t + 0.02);
-        hb2.frequency.linearRampToValueAtTime(250, t + 0.1);
-        hb2.frequency.linearRampToValueAtTime(600, t + 0.15);
-        hg2.gain.setValueAtTime(0.04, t + 0.02);
-        hg2.gain.linearRampToValueAtTime(0, t + 0.18);
-        hb2.start(t + 0.02); hb2.stop(t + 0.18);
-        break;
-      }
-
-      case 'boss_telegraph': { // boss about to charge — rising growl warning
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(60, t);
-        osc.frequency.linearRampToValueAtTime(180, t + 0.25);
-        gain.gain.setValueAtTime(0.05, t);
-        gain.gain.linearRampToValueAtTime(0.18, t + 0.2);
-        gain.gain.linearRampToValueAtTime(0, t + 0.3);
-        osc.start(t); osc.stop(t + 0.3);
-        // high screech overtone
-        const bt2 = ac.createOscillator();
-        const bg2 = ac.createGain();
-        bt2.connect(bg2); bg2.connect(ac.destination);
-        bt2.type = 'square';
-        bt2.frequency.setValueAtTime(300, t + 0.1);
-        bt2.frequency.linearRampToValueAtTime(600, t + 0.25);
-        bg2.gain.setValueAtTime(0.03, t + 0.1);
-        bg2.gain.linearRampToValueAtTime(0.08, t + 0.22);
-        bg2.gain.linearRampToValueAtTime(0, t + 0.3);
-        bt2.start(t + 0.1); bt2.stop(t + 0.3);
-        break;
-      }
-
-      case 'boss_step': { // boss footstep — heavy thud
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(50, t);
-        osc.frequency.linearRampToValueAtTime(30, t + 0.1);
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.12);
-        osc.start(t); osc.stop(t + 0.12);
-        break;
-      }
-
-      case 'shield_hum': { // barrier shield pulse — resonant hum
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(220, t);
-        osc.frequency.linearRampToValueAtTime(260, t + 0.06);
-        osc.frequency.linearRampToValueAtTime(220, t + 0.12);
-        gain.gain.setValueAtTime(0.05, t);
-        gain.gain.linearRampToValueAtTime(0.08, t + 0.04);
-        gain.gain.linearRampToValueAtTime(0, t + 0.12);
-        osc.start(t); osc.stop(t + 0.12);
-        break;
-      }
-
-      case 'heal': { // health pickup — warm ascending chime
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(523, t);
-        osc.frequency.linearRampToValueAtTime(784, t + 0.1);
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0.06, t + 0.08);
-        gain.gain.linearRampToValueAtTime(0, t + 0.15);
-        osc.start(t); osc.stop(t + 0.15);
-        const ho2 = ac.createOscillator();
-        const hg2 = ac.createGain();
-        ho2.connect(hg2); hg2.connect(ac.destination);
-        ho2.type = 'sine';
-        ho2.frequency.setValueAtTime(659, t + 0.05);
-        ho2.frequency.linearRampToValueAtTime(1047, t + 0.15);
-        hg2.gain.setValueAtTime(0.06, t + 0.05);
-        hg2.gain.linearRampToValueAtTime(0, t + 0.2);
-        ho2.start(t + 0.05); ho2.stop(t + 0.2);
-        break;
-      }
-
-      case 'zap': { // lightning field strike — sharp crackling zap
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(2000, t);
-        osc.frequency.linearRampToValueAtTime(600, t + 0.03);
-        osc.frequency.linearRampToValueAtTime(1800, t + 0.05);
-        osc.frequency.linearRampToValueAtTime(400, t + 0.08);
-        gain.gain.setValueAtTime(0.07, t);
-        gain.gain.linearRampToValueAtTime(0.04, t + 0.03);
-        gain.gain.linearRampToValueAtTime(0.06, t + 0.05);
-        gain.gain.linearRampToValueAtTime(0, t + 0.08);
-        osc.start(t); osc.stop(t + 0.08);
-        break;
-      }
-
-      default:
-        gain.gain.setValueAtTime(0, t);
-        osc.start(t); osc.stop(t + 0.01);
-    }
-  } catch (e) { /* audio not available, that's fine */ }
-}
+// sfx() + audio context + master gain live in shared/sfx.js so MP
+// gets the same switch (was missing several cases). getAudio is
+// imported under that name so the existing BGM call sites don't
+// have to change.
 
 // --- analytics (fire-and-forget, never blocks gameplay) ---
 const ANALYTICS_URL = 'https://survivors-analytics.sammcgrail.workers.dev';
@@ -320,7 +70,7 @@ window.addEventListener('beforeunload', () => {
   track({ type: 'session_end', duration_ms: Date.now() - sessionStart });
 });
 
-// --- battle music (map-aware + mute toggle) ---
+// --- music system (menu + battle, map-aware + mute toggle) ---
 const MAP_TRACKS = {
   arena: 'arena_theme.ogg',
   neon: 'neon_grid.ogg',
@@ -328,83 +78,77 @@ const MAP_TRACKS = {
   graveyard: 'graveyard_theme.ogg',
   ruins: 'ruins_theme.ogg',
 };
+const MENU_TRACK = 'menu_theme.ogg';
 const DEFAULT_TRACK_OGG = 'survivors_battle.ogg';
-const DEFAULT_TRACK_MP3 = 'survivors_battle.mp3';
-const MUSIC_VOL = 0.35;
+// BGM volume — persisted per-slider in localStorage. SFX volume
+// lives in shared/sfx.js (since the gain node is created there).
+let bgmVol = 0.45;
+try { const v = localStorage.getItem('survivors_bgm_vol'); if (v !== null) bgmVol = +v; } catch (_) {}
+const MENU_VOL_RATIO = 0.67; // menu music plays at 67% of bgm slider
 
-let bgMusic = null;
-let bgMusicGain = null;
-let musicFading = false;
-let currentTrackSrc = null;
+let menuMusicStarted = false;
 let musicMuted = false;
 try { musicMuted = localStorage.getItem('survivors_mute') === '1'; } catch (_) {}
 function updateMuteBtn() {
   const b = document.getElementById('mute-btn');
   if (b) b.textContent = musicMuted ? '🔇' : '🔊';
 }
+function initVolSliders() {
+  const bs = document.getElementById('vol-bgm');
+  const ss = document.getElementById('vol-sfx');
+  if (bs) bs.value = Math.round(bgmVol * 100);
+  if (ss) ss.value = Math.round(getSfxVol() * 100);
+}
 updateMuteBtn();
+initVolSliders();
+
+function setBgmVol(v) {
+  bgmVol = Math.max(0, Math.min(1, v / 100));
+  try { localStorage.setItem('survivors_bgm_vol', bgmVol.toFixed(2)); } catch (_) {}
+  if (!musicMuted) {
+    battlePlayer.setVol(bgmVol);
+    menuPlayer.setVol(bgmVol * MENU_VOL_RATIO);
+  }
+}
+function setSfxVol(v) {
+  // Slider is 0..100; shared module owns persistence + gain wiring.
+  _setSfxVol(Math.max(0, Math.min(1, v / 100)));
+}
+function toggleVolPanel() {
+  const p = document.getElementById('vol-panel');
+  if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
+}
+
+// Menu music — plays on the start/death screen. Fades out when game
+// starts, fades back in on return. Barn's E dorian 78 BPM ambient.
+// fadeIn keeps the audio element loaded so the track resumes from
+// where it was paused instead of restarting from 0:00.
+const battlePlayer = makeBgmPlayer();
+const menuPlayer = makeBgmPlayer();
+
+function startMenuMusic() {
+  if (menuMusicStarted) return;
+  menuPlayer.play(MENU_TRACK, musicMuted ? 0 : bgmVol * MENU_VOL_RATIO);
+  menuMusicStarted = true;
+}
+function fadeOutMenuMusic() { menuPlayer.fadeOut(); }
+function fadeInMenuMusic() {
+  menuPlayer.play(MENU_TRACK, musicMuted ? 0 : bgmVol * MENU_VOL_RATIO);
+}
 
 function startMusic() {
-  try {
-    const ac = getAudio();
-    if (ac.state === 'suspended') ac.resume();
-    // Pick track for current map.
-    const mapId = (game && game.mapId) || selectedMapId || 'arena';
-    const canOgg = !bgMusic || (bgMusic.canPlayType && bgMusic.canPlayType('audio/ogg; codecs=vorbis'));
-    let src = MAP_TRACKS[mapId] || (canOgg ? DEFAULT_TRACK_OGG : DEFAULT_TRACK_MP3);
-    // If track changed, tear down old audio element (createMediaElementSource
-    // binds permanently to one AudioContext, can't reassign .src safely).
-    if (bgMusic && currentTrackSrc !== src) {
-      bgMusic.pause();
-      bgMusic = null;
-      bgMusicGain = null;
-    }
-    if (!bgMusic) {
-      bgMusic = new Audio();
-      bgMusic.loop = true;
-      bgMusic.volume = 1; // volume via gain node
-      bgMusic.src = src;
-      currentTrackSrc = src;
-      const mediaSrc = ac.createMediaElementSource(bgMusic);
-      bgMusicGain = ac.createGain();
-      bgMusicGain.gain.value = 0;
-      mediaSrc.connect(bgMusicGain);
-      bgMusicGain.connect(ac.destination);
-    }
-    bgMusic.currentTime = 0;
-    bgMusic.play().catch(() => {});
-    // fade in over 2s (skip if muted)
-    const target = musicMuted ? 0 : MUSIC_VOL;
-    bgMusicGain.gain.cancelScheduledValues(ac.currentTime);
-    bgMusicGain.gain.setValueAtTime(0, ac.currentTime);
-    bgMusicGain.gain.linearRampToValueAtTime(target, ac.currentTime + 2);
-    musicFading = false;
-  } catch (e) {}
+  const mapId = (game && game.mapId) || selectedMapId || 'arena';
+  const src = MAP_TRACKS[mapId] || DEFAULT_TRACK_OGG;
+  battlePlayer.play(src, musicMuted ? 0 : bgmVol);
 }
-
-function fadeOutMusic() {
-  if (!bgMusic || !bgMusicGain || musicFading) return;
-  musicFading = true;
-  try {
-    const ac = getAudio();
-    bgMusicGain.gain.cancelScheduledValues(ac.currentTime);
-    bgMusicGain.gain.setValueAtTime(bgMusicGain.gain.value, ac.currentTime);
-    bgMusicGain.gain.linearRampToValueAtTime(0, ac.currentTime + 1.5);
-    setTimeout(() => { bgMusic.pause(); musicFading = false; }, 1600);
-  } catch (e) {}
-}
+function fadeOutMusic() { battlePlayer.fadeOut(); }
 
 function toggleMuteMusic() {
   musicMuted = !musicMuted;
   try { localStorage.setItem('survivors_mute', musicMuted ? '1' : '0'); } catch (_) {}
   updateMuteBtn();
-  if (bgMusicGain) {
-    try {
-      const ac = getAudio();
-      bgMusicGain.gain.cancelScheduledValues(ac.currentTime);
-      bgMusicGain.gain.linearRampToValueAtTime(musicMuted ? 0 : MUSIC_VOL, ac.currentTime + 0.3);
-    } catch (_) {}
-  }
+  battlePlayer.setVol(musicMuted ? 0 : bgmVol, 0.3);
+  menuPlayer.setVol(musicMuted ? 0 : bgmVol * MENU_VOL_RATIO, 0.3);
 }
 
 // --- resize ---
@@ -426,6 +170,7 @@ let selectedMapId = 'neon';    // default map (code-rendered abstract grid)
 
 function selectWeapon(type) {
   selectedWeapon = type;
+  startMenuMusic(); // first interaction triggers audio context
   document.querySelectorAll('.weapon-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.weapon === type);
   });
@@ -495,6 +240,8 @@ function initGame() {
     projectiles: [],
     gems: [],
     heartDrops: [],
+    consumables: [],
+    enemyProjectiles: [],
     particles: [],
     floatingTexts: [],
     time: 0,
@@ -521,6 +268,7 @@ function initGame() {
     // Eager-init here so sim modules don't need defensive `|| []` checks.
     chainEffects: [],
     meteorEffects: [],
+    chargeTrails: [],
     // Map state — `arena` overrides the global WORLD dims; `obstacles`
     // is consumed by sim/collision.js and rendered by the canvas pass.
     arena: { w: map.width, h: map.height },
@@ -721,6 +469,7 @@ function saveBestRun(run) {
 
 function showDeathScreen(g) {
   fadeOutMusic();
+  fadeInMenuMusic();
   track({ type: 'death', wave: g.wave, kills: g.kills, weapons: g.player.weapons.map(w => w.type) });
   const mins = Math.floor(g.time / 60);
   const secs = Math.floor(g.time % 60);
@@ -1037,44 +786,21 @@ function render() {
 }
 
 // --- input ---
-const KEY_MAP = {
-  'w': 'up', 'arrowup': 'up',
-  's': 'down', 'arrowdown': 'down',
-  'a': 'left', 'arrowleft': 'left',
-  'd': 'right', 'arrowright': 'right',
-};
-
-document.addEventListener('keydown', e => {
-  // level-up keyboard shortcuts
-  if (paused && window._levelChoices && window._levelChoices.length > 0) {
-    const num = parseInt(e.key);
-    if (num >= 1 && num <= window._levelChoices.length) {
-      window._levelChoices[num - 1]();
-      e.preventDefault();
-      return;
-    }
-  }
-  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
-  const k = KEY_MAP[e.key.toLowerCase()];
-  if (k) { keys[k] = true; e.preventDefault(); }
+// Keyboard handlers + KEY_MAP live in shared/input.js. Level-up
+// callback gates on `paused` (SP's pause flag = level-up overlay
+// is open). `onClear` resets analog joystick state too — the
+// joystick itself stays inline below since SP needs analog
+// magnitude that MP doesn't (MP only sends boolean keys to server).
+installKeyboardInput(keys, {
+  onLevelUpKey(idx) {
+    if (!paused || !window._levelChoices) return false;
+    const pick = window._levelChoices[idx];
+    if (!pick) return false;
+    pick();
+    return true;
+  },
+  onClear() { analogMove.x = 0; analogMove.y = 0; },
 });
-
-document.addEventListener('keyup', e => {
-  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
-  const k = KEY_MAP[e.key.toLowerCase()];
-  if (k) { keys[k] = false; e.preventDefault(); }
-});
-
-// Clear all input on blur / tab hide. Without this, holding a key, alt-tabbing,
-// and releasing it while the page is hidden leaves the key permanently "down"
-// — player drifts forever after returning. Mobile home-button does the same.
-function clearAllInput() {
-  keys.up = keys.down = keys.left = keys.right = false;
-  analogMove.x = 0;
-  analogMove.y = 0;
-}
-window.addEventListener('blur', clearAllInput);
-document.addEventListener('visibilitychange', () => { if (document.hidden) clearAllInput(); });
 
 // --- mobile invisible touch joystick ---
 const joyZone = document.getElementById('joystick-zone');
@@ -1226,6 +952,7 @@ function startGame() {
   }
   const nameEl = document.getElementById('name-input');
   if (nameEl && nameEl.value.trim()) game.playerName = nameEl.value.trim();
+  fadeOutMenuMusic();
   startMusic();
   track({ type: 'game_start' });
   // Load this map's ground tileset (async — render falls back to grid
@@ -1246,6 +973,7 @@ document.addEventListener('keydown', e => {
   const startVisible = startScreen.style.display !== 'none' && startScreen.offsetParent !== null;
   const deathVisible = deathScreen.style.display === 'flex';
   if (startVisible) {
+    startMenuMusic(); // any key on start screen triggers audio
     if (e.key === '1') selectWeapon('spit');
     else if (e.key === '2') selectWeapon('breath');
     else if (e.key === '3') selectWeapon('charge');
@@ -1275,6 +1003,9 @@ window.hidePrestigeShop = hidePrestigeShop;
 window.purchaseUnlock = purchaseUnlock;
 window.toggleCosmeticEquip = toggleCosmeticEquip;
 window.toggleMute = toggleMuteMusic;
+window.setBgmVol = setBgmVol;
+window.setSfxVol = setSfxVol;
+window.toggleVolPanel = toggleVolPanel;
 window.showBestiary = showBestiary;
 window.hideBestiary = hideBestiary;
 
