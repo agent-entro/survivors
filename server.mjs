@@ -15,13 +15,13 @@ import { tickSim } from './src/shared/sim/tick.js';
 import { createRng } from './src/shared/sim/rng.js';
 import { createWeapon } from './src/shared/weapons.js';
 import { POWERUPS, getAvailableChoices } from './src/shared/sim/powerups.js';
-import { MAPS } from './src/shared/maps.js';
+import { MAPS, resolveMapObstacles } from './src/shared/maps.js';
 import { pushOutOfObstacles } from './src/shared/sim/collision.js';
 import { applyUnlocks, sanitizePrestige } from './src/shared/prestige.js';
 
 // Map rotation. Tomorrow this'll be a vote / lobby choice; for now the
 // server picks a random one each session reset.
-const MAP_ROTATION = ['arena', 'forest', 'ruins', 'graveyard'];
+const MAP_ROTATION = ['arena', 'forest', 'ruins', 'graveyard', 'wilderness', 'catacombs'];
 function pickMapId(rng) {
   return MAP_ROTATION[rng.int(MAP_ROTATION.length)];
 }
@@ -101,8 +101,11 @@ function initGame() {
     projectiles: [],
     gems: [],
     heartDrops: [],
+    consumables: [],
+    enemyProjectiles: [],
     chainEffects: [],
     meteorEffects: [],
+    chargeTrails: [],
     deathFeed: [],
     time: 0,
     wave: 1,
@@ -120,7 +123,7 @@ function initGame() {
     rng,
     mapId,
     arena: { w: map.width, h: map.height },
-    obstacles: map.obstacles,
+    obstacles: resolveMapObstacles(map, rng),
   };
 }
 
@@ -234,6 +237,14 @@ function snapshotWeapon(w) {
     o.chargeTimer = r2(w.chargeTimer);
     o.width = w.width;
   }
+  // Cooldown indicator — drawn around the player on charge/fortress
+  // while the weapon recharges. Without these the MP player has no
+  // visual cue when their next dash is ready (SP reads w.timer +
+  // w.cooldown directly from the live sim).
+  if ((w.type === 'charge' || w.type === 'fortress') && !w.active) {
+    if (w.timer !== undefined)    o.timer = r2(w.timer);
+    if (w.cooldown !== undefined) o.cooldown = w.cooldown;
+  }
   return o;
 }
 
@@ -271,12 +282,31 @@ function gameSnapshot() {
       x: r1(e.x), y: r1(e.y),
       hp: e.hp, maxHp: e.maxHp,
       radius: e.radius, color: e.color,
-      hitFlash: r2(e.hitFlash || 0),
-      // Ship dying only when present so MP can draw the shrink+fade
-      // death animation that shared drawEnemies already handles.
+      // hitFlash + dying ride only when meaningful — the common
+      // case (no flash, alive) saves bytes per enemy per tick.
+      // Renderer reads both as `|| 0` / `=== undefined` so missing
+      // is fine.
+      ...(e.hitFlash > 0 ? { hitFlash: r2(e.hitFlash) } : {}),
       ...(e.dying !== undefined ? { dying: r2(e.dying) } : {}),
+      // Active statuses ride the snapshot so the renderer can keep a
+      // sprite tint up while the effect is in flight (vs. only the
+      // STATUS_APPLIED particle pop that fires once on apply). Ships
+      // just type + remaining — magnitude/tickRate/tickAccum stay
+      // sim-only since the renderer doesn't need them.
+      ...(e.statusEffects && e.statusEffects.length > 0
+        ? { statusEffects: e.statusEffects.map(s => ({ type: s.type, remaining: r2(s.remaining) })) }
+        : {}),
     })),
-    gems: game.gems.map(gem => ({ x: r1(gem.x), y: r1(gem.y), xp: gem.xp })),
+    // Tier ride-along — 0 (default) for small/medium, 1 for >=30 xp,
+    // 2 for >=80 xp. Lets drawGem render boss/elite drops larger so
+    // a 500-xp gem reads distinct from a 4-xp swarm gem on the
+    // ground. xp itself stays off the snapshot.
+    gems: game.gems.map(gem => {
+      const o = { x: r1(gem.x), y: r1(gem.y) };
+      if (gem.xp >= 80) o.tier = 2;
+      else if (gem.xp >= 30) o.tier = 1;
+      return o;
+    }),
     projectiles: game.projectiles.map(pr => ({
       x: r1(pr.x), y: r1(pr.y), radius: pr.radius, owner: pr.owner,
       // Color + velocity ride along so the shared projectile render
@@ -293,9 +323,34 @@ function gameSnapshot() {
       x: r1(m.x), y: r1(m.y), radius: m.radius,
       life: r2(m.life), phase: m.phase, color: m.color,
     })),
+    // Renderer doesn't read heal on the heart snapshot — `+N HP`
+    // text comes through HEART_PICKUP event when grabbed.
     heartDrops: game.heartDrops.map(h => ({
-      x: r1(h.x), y: r1(h.y), heal: h.heal, radius: h.radius,
+      x: r1(h.x), y: r1(h.y), radius: h.radius,
       life: r2(h.life), bobPhase: r2(h.bobPhase),
+    })),
+    // Consumables never despawn now (life: Infinity) so dropping
+    // life saves bytes per drop per tick. Late-fade branch in
+    // drawConsumables is dead code under the new lifetime policy.
+    consumables: game.consumables.map(c => ({
+      x: r1(c.x), y: r1(c.y), type: c.type, radius: c.radius,
+      color: c.color, bobPhase: r2(c.bobPhase),
+    })),
+    enemyProjectiles: (game.enemyProjectiles || []).map(ep => {
+      const o = {
+        x: r1(ep.x), y: r1(ep.y),
+        vx: r1(ep.vx), vy: r1(ep.vy),
+        radius: ep.radius, color: ep.color,
+        source: ep.source,
+      };
+      // Homing flag tells the renderer to add a tracking glow so
+      // players can read "this one curves" at a glance.
+      if (ep.homing) o.homing = true;
+      return o;
+    }),
+    chargeTrails: (game.chargeTrails || []).map(t => ({
+      x: r1(t.x), y: r1(t.y), radius: t.radius,
+      life: r2(t.life), color: t.color,
     })),
     deathFeed: game.deathFeed.slice(-5).map(d => ({ text: d.text, time: r1(d.time) })),
     // Transient sim events from this tick — damage numbers, kill
@@ -320,6 +375,12 @@ function gameSnapshot() {
       if (e.healed !== undefined) o.healed = r1(e.healed);
       if (e.level !== undefined) o.level = e.level;
       if (e.wave !== undefined) o.wave = e.wave;
+      if (e.label !== undefined) o.label = e.label;
+      if (e.ctype !== undefined) o.ctype = e.ctype;
+      if (e.tx !== undefined) o.tx = r1(e.tx);
+      if (e.ty !== undefined) o.ty = r1(e.ty);
+      if (e.duration !== undefined) o.duration = r2(e.duration);
+      if (e.phase !== undefined) o.phase = e.phase;
       return o;
     }),
     waveMsg:        game.waveMsgTimer        > 0 ? game.waveMsg        : null,
