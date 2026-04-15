@@ -595,6 +595,55 @@ function lerpState(prev, curr, t) {
 }
 
 // ============================================================
+// MINIMAP
+// ============================================================
+
+function drawMinimap(ctx, state, arenaRef, localId) {
+  const MAP_SIZE = 150;
+  const PAD = 12;
+  const W = canvas.width;
+
+  const arenaW = (arenaRef && arenaRef.w) || 3000;
+  const arenaH = (arenaRef && arenaRef.h) || 3000;
+
+  // Top-right corner, 12px from edges
+  const ox = W - MAP_SIZE - PAD;
+  const oy = PAD;
+
+  // Semi-transparent dark background
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fillRect(ox, oy, MAP_SIZE, MAP_SIZE);
+
+  // Subtle border so it reads against dark map backgrounds
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(ox, oy, MAP_SIZE, MAP_SIZE);
+
+  const scaleX = MAP_SIZE / arenaW;
+  const scaleY = MAP_SIZE / arenaH;
+
+  // Enemies — red 2×2 dots
+  ctx.fillStyle = '#e74c3c';
+  for (const e of state.enemies) {
+    ctx.fillRect(ox + e.x * scaleX - 1, oy + e.y * scaleY - 1, 2, 2);
+  }
+
+  // Players — white 2×2, local player yellow 3×3
+  for (const p of state.players) {
+    if (!p.alive) continue;
+    const px = ox + p.x * scaleX;
+    const py = oy + p.y * scaleY;
+    if (p.id === localId) {
+      ctx.fillStyle = '#f1c40f';
+      ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
+    } else {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(px - 1, py - 1, 2, 2);
+    }
+  }
+}
+
+// ============================================================
 // RENDER
 // ============================================================
 
@@ -780,6 +829,9 @@ function render(dt) {
   drawFloatingTexts(ctx, floatingTexts);
 
   ctx.restore();
+
+  // --- minimap (screen-space HUD, top-right) ---
+  drawMinimap(ctx, state, arena, myId);
 
   // --- spectator label ---
   if (me && !me.alive) {
