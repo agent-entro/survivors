@@ -6,10 +6,38 @@ import { ENEMY_TYPES, enemyType, scaleEnemy } from '../enemyTypes.js';
 import { WORLD_W, WORLD_H } from '../constants.js';
 import { EVT, emit } from './events.js';
 import { pushOutOfObstacles, obstacleAvoidance } from './collision.js';
+import { enemyShootingAi } from './enemyProjectiles.js';
+import { damageEnemy } from './damage.js';
 
 // Reusable zero vector for the no-obstacles path — saves an
 // allocation per enemy per tick on maps without obstacles.
 const ZERO_VEC = { x: 0, y: 0 };
+
+// Apply a status effect to an enemy. Same-type effects refresh duration
+// (no stacking) — caller can safely re-apply on every hit.
+//
+// `enemy.statusResist` (0..1) shortens incoming durations: boss/elite
+// get 0.5 (half duration), spawner 0.3, trash 0 (full). Replaces the
+// hard "boss immune" behavior — bosses can be slowed/burned briefly,
+// just not locked down. Phase 3 dodging stays a real skill check
+// (boss freeze ≈ 0.4s with the 0.5 resist) without trivializing it.
+//
+// effect shape: { type, remaining, magnitude, tickRate? }
+export function applyStatus(g, enemy, effect) {
+  if (enemy.dying !== undefined) return;
+  const resist = enemy.statusResist || 0;
+  const dur = effect.remaining * (1 - resist);
+  if (dur <= 0) return; // resist 1.0 = full immunity
+  enemy.statusEffects ??= [];
+  const existing = enemy.statusEffects.find(s => s.type === effect.type);
+  if (existing) {
+    // Refresh — don't reset tickAccum so in-progress burn ticks aren't lost.
+    existing.remaining = Math.max(existing.remaining, dur);
+    return;
+  }
+  enemy.statusEffects.push({ ...effect, remaining: dur, tickAccum: 0 });
+  emit(g, EVT.STATUS_APPLIED, { statusType: effect.type, x: enemy.x, y: enemy.y });
+}
 
 // Cell size for the spatial hash. Sized to cover the largest flock
 // perception radius (150 for fast/tank) within a 1-cell neighbor
@@ -56,6 +84,9 @@ export function spawnEnemy(g) {
   // start its life clipped through a wall.
   if (g.obstacles && g.obstacles.length > 0) pushOutOfObstacles(e, g.obstacles);
   g.enemies.push(e);
+  // Boss arrival is a moment — emit so clients can play the
+  // ominous sfx + telegraph particles + screen shake.
+  if (e.name === 'boss') emit(g, EVT.BOSS_SPAWN, { x: e.x, y: e.y });
 }
 
 // Returns the alive player with the smallest distance to (ex, ey), plus
@@ -76,6 +107,50 @@ function nearestAlivePlayer(g, ex, ey) {
 // Boss steps + telegraph use g.rng for cadence so server replay stays
 // in sync. Ghost orbit and movement are deterministic given current pos.
 function updateBossAi(g, e, dt, edx, edy, dist) {
+  // --- Phase transitions ---
+  // baseSpeed captured once so phase multipliers stack cleanly off
+  // the wave-scaled value set by scaleEnemy, not the base type speed.
+  if (!e.phase) {
+    e.phase = 1;
+    e.baseSpeed = e.speed;
+  }
+
+  const hpPct = e.hp / e.maxHp;
+  if (hpPct <= 1 / 3 && e.phase < 3) {
+    e.phase = 3;
+    // +30% from phase 2, then another +20% = ×1.56 total vs baseSpeed
+    e.speed = e.baseSpeed * 1.56;
+    e.homing = true;
+    e.summonTimer = 0; // fire first pulse immediately
+    // Drop shoot cooldown in case boss enters phase 3 directly
+    if (e.shootCooldown) e.shootCooldown = 2.0;
+    emit(g, EVT.BOSS_PHASE, { phase: 3, x: e.x, y: e.y });
+  } else if (hpPct <= 2 / 3 && e.phase < 2) {
+    e.phase = 2;
+    e.speed = e.baseSpeed * 1.30;
+    if (e.shootCooldown) e.shootCooldown = 2.0;
+    emit(g, EVT.BOSS_PHASE, { phase: 2, x: e.x, y: e.y });
+  }
+
+  // Phase 3 summon pulse — 3 swarm minions every 8 s, runs during
+  // both stalk and charge so the pressure never lets up.
+  if (e.phase === 3) {
+    e.summonTimer -= dt;
+    if (e.summonTimer <= 0) {
+      e.summonTimer = 8;
+      const base = ENEMY_TYPES.find(t => t.name === 'swarm');
+      for (let s = 0; s < 3; s++) {
+        const sa = g.rng.random() * Math.PI * 2;
+        const sr = 20 + g.rng.random() * 25;
+        const minion = scaleEnemy(base, g.wave, g.rng);
+        minion.x = e.x + Math.cos(sa) * sr;
+        minion.y = e.y + Math.sin(sa) * sr;
+        g.enemies.push(minion);
+      }
+    }
+  }
+
+  // --- Charge movement ---
   if (e.charging > 0) {
     e.x += e.chargeDx * e.speed * 3 * dt;
     e.y += e.chargeDy * e.speed * 3 * dt;
@@ -100,7 +175,7 @@ function updateBossAi(g, e, dt, edx, edy, dist) {
   }
 }
 
-function updateGhostMovement(e, dt, edx, edy, dist) {
+function updateGhostMovement(e, dt, edx, edy, dist, speedMod = 1) {
   const nx = edx / dist;
   const ny = edy / dist;
   const sign = e.orbitSign || 1;
@@ -109,8 +184,8 @@ function updateGhostMovement(e, dt, edx, edy, dist) {
   // closing at range, committed up close, drive-by prevented at melee
   const inward = dist > 100 ? 0.8 : 1.0;
   const orbit = dist > 100 ? 0.6 : dist > 30 ? 0.3 : 0.1;
-  e.x += (nx * inward + perpX * orbit) * e.speed * dt;
-  e.y += (ny * inward + perpY * orbit) * e.speed * dt;
+  e.x += (nx * inward + perpX * orbit) * e.speed * speedMod * dt;
+  e.y += (ny * inward + perpY * orbit) * e.speed * speedMod * dt;
 }
 
 function updateSpawnerAi(g, e, dt) {
@@ -191,19 +266,53 @@ function updateEnemyTick(g, dt, hash) {
     const e = g.enemies[i];
     if (e.dying !== undefined) continue; // animating but not interacting
 
+    // Status effects: drain durations, apply burn DoT, compute speed
+    // multiplier. Resist (boss 0.5 / elite 0.5 / spawner 0.3) shortens
+    // incoming durations at apply-time, not here. Freeze reuses the
+    // stunTimer gate so spawner-birth and shooting are also suppressed
+    // (matches thunder_god overcharge behavior).
+    let speedMod = 1;
+    if (e.statusEffects?.length) {
+      e.statusEffects = e.statusEffects.filter(s => {
+        s.remaining -= dt;
+        if (s.type === 'burn') {
+          s.tickAccum = (s.tickAccum || 0) + dt;
+          // Drain accumulated time in full tick increments so fast dt
+          // values don't skip a tick.
+          while (s.tickAccum >= s.tickRate && !e.dying) {
+            damageEnemy(g, e, s.magnitude, null);
+            s.tickAccum -= s.tickRate;
+          }
+        } else if (s.type === 'slow') {
+          speedMod = Math.min(speedMod, s.magnitude);
+        } else if (s.type === 'freeze') {
+          speedMod = 0;
+        }
+        if (s.remaining <= 0) {
+          emit(g, EVT.STATUS_EXPIRED, { statusType: s.type, x: e.x, y: e.y });
+          return false;
+        }
+        return true;
+      });
+      // Freeze: bump stunTimer by one frame so the existing gate
+      // blocks movement/spawner/shooting this tick without touching
+      // the stun decrement logic that runs inside the guard.
+      if (speedMod === 0) e.stunTimer = Math.max(e.stunTimer || 0, dt + 0.001);
+    }
+
     // Stunned enemies freeze in place but still take damage. Thunder god
-    // overcharge is the current source; any future CC rides the same hook.
+    // overcharge is the current source; freeze status extends this gate.
     if (e.stunTimer > 0) {
       e.stunTimer -= dt;
     } else {
       const target = nearestAlivePlayer(g, e.x, e.y);
       if (target && target.dist > 1) {
-        if (e.name === 'ghost')      updateGhostMovement(e, dt, target.dx, target.dy, target.dist);
+        if (e.name === 'ghost')      updateGhostMovement(e, dt, target.dx, target.dy, target.dist, speedMod);
         else if (e.name === 'boss')  updateBossAi(g, e, dt, target.dx, target.dy, target.dist);
         else if (!e.flock) {
           // Fallback for any type without flock config — pure chase.
-          e.x += (target.dx / target.dist) * e.speed * dt;
-          e.y += (target.dy / target.dist) * e.speed * dt;
+          e.x += (target.dx / target.dist) * e.speed * speedMod * dt;
+          e.y += (target.dy / target.dist) * e.speed * speedMod * dt;
         } else {
           // Boids blend: chase + separation + alignment + cohesion +
           // obstacle avoidance. Avoidance has a high implicit weight
@@ -232,13 +341,13 @@ function updateEnemyTick(g, dt, hash) {
                  + avoid.y * 5.0;
           const m = Math.hypot(vx, vy);
           if (m > 0.001) {
-            e.vx = (vx / m) * e.speed;
-            e.vy = (vy / m) * e.speed;
+            e.vx = (vx / m) * e.speed * speedMod;
+            e.vy = (vy / m) * e.speed * speedMod;
           } else {
             // Forces canceled exactly — fall back to chase so the enemy
             // doesn't freeze in place.
-            e.vx = chaseX * e.speed;
-            e.vy = chaseY * e.speed;
+            e.vx = chaseX * e.speed * speedMod;
+            e.vy = chaseY * e.speed * speedMod;
           }
           e.x += e.vx * dt;
           e.y += e.vy * dt;
@@ -254,6 +363,14 @@ function updateEnemyTick(g, dt, hash) {
     // hive doesn't keep pumping out swarmlings during the freeze.
     if (e.name === 'spawner' && (!e.stunTimer || e.stunTimer <= 0)) updateSpawnerAi(g, e, dt);
 
+    // Ranged attacks — elites fire aimed shots, bosses fire spreads.
+    // Uses its own nearest-player lookup because the movement target
+    // is scoped inside the stun guard above.
+    if (e.shootCooldown && (!e.stunTimer || e.stunTimer <= 0)) {
+      const shootTarget = nearestAlivePlayer(g, e.x, e.y);
+      enemyShootingAi(g, e, dt, shootTarget);
+    }
+
     if (e.hitFlash > 0) e.hitFlash -= dt * 5;
 
     // Contact damage — hit every overlapping alive player (not just nearest).
@@ -268,7 +385,7 @@ function updateEnemyTick(g, dt, hash) {
         if (p.hp <= 0) {
           p.hp = 0;
           p.alive = false;
-          emit(g, EVT.PLAYER_DEATH, { by: e.name, pid: p.id });
+          emit(g, EVT.PLAYER_DEATH, { x: p.x, y: p.y, by: e.name, pid: p.id });
         }
       }
     }
