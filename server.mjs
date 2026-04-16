@@ -103,6 +103,7 @@ function initGame() {
     heartDrops: [],
     chainEffects: [],
     meteorEffects: [],
+    pendingPulls: [],
     deathFeed: [],
     time: 0,
     wave: 1,
@@ -291,7 +292,11 @@ function gameSnapshot() {
     })),
     meteorEffects: game.meteorEffects.map(m => ({
       x: r1(m.x), y: r1(m.y), radius: m.radius,
-      life: r2(m.life), phase: m.phase, color: m.color,
+      life: r2(m.life), warnLife: m.warnLife, phase: m.phase, color: m.color,
+    })),
+    pendingPulls: game.pendingPulls.map(pl => ({
+      x: r1(pl.x), y: r1(pl.y), radius: pl.radius,
+      elapsed: r2(pl.elapsed), duration: pl.duration,
     })),
     heartDrops: game.heartDrops.map(h => ({
       x: r1(h.x), y: r1(h.y), heal: h.heal, radius: h.radius,

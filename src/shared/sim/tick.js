@@ -7,7 +7,7 @@
 // - gems pull last since they only react to player position
 // - chain/meteor effect lifetimes drain after everything that emitted them
 import { updateWaves } from './waves.js';
-import { updateWeapons, updateAuras, updateChainEffects, updateMeteorEffects } from './weapons_runtime.js';
+import { updateWeapons, updateAuras, updateChainEffects, updateMeteorEffects, updatePendingPulls } from './weapons_runtime.js';
 import { updateProjectiles } from './projectiles.js';
 import { updateEnemies } from './enemies.js';
 import { updateGems } from './gems.js';
@@ -18,6 +18,7 @@ export function tickSim(g, dt) {
   updateTerrain(g, dt);          // sets p._terrainSlow, applies hostile DoT
   updateWaves(g, dt);
   updateWeapons(g, dt);
+  updatePendingPulls(g, dt);    // pull enemies before they move this frame
   updateProjectiles(g, dt);
   updateAuras(g, dt);
   updateEnemies(g, dt);
