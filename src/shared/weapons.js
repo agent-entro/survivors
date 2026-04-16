@@ -1,5 +1,24 @@
-// Pure weapon definitions + icon map. Both SP and MP read from here.
+// Pure weapon definitions + icon map. Both SP and MP import from here.
 // Keep free of game-state mutations and DOM/canvas references.
+//
+// ── Authoritative stats & flow ────────────────────────────────────────
+//  Every field returned by createWeapon() is the canonical base value.
+//  Neither SP nor MP defines weapon stats elsewhere — all scaling is
+//  applied at runtime via the player object:
+//    damage     × p.damageMulti           (Amplify powerup)
+//    timer      -= dt * p.attackSpeedMulti (Attack Speed powerup)
+//    count/pierce += p.projectileBonus    (Volley powerup)
+//
+//  The server ships weapon state to MP clients via snapshotWeapon()
+//  (server.mjs). Only visual/animated fields are snapshotted — phase,
+//  pulsePhase, fireCount, active, chargeTimer, etc. Stat fields (damage,
+//  cooldown, speed, range…) are NOT shipped in the snapshot because MP
+//  clients don't run the sim; the authoritative server does.
+//
+//  Evolution weapons (dragon_storm, thunder_god, meteor_orbit, fortress)
+//  are created by powerups.js:apply() calling createWeapon() — same path
+//  as base weapons. No parallel stat tables exist.
+// ─────────────────────────────────────────────────────────────────────
 
 export const WEAPON_ICONS = {
   spit: '🔮', breath: '🌀', charge: '🐂',
