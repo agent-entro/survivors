@@ -3,7 +3,10 @@
 // Bundled by scripts/build.cjs → bundle.js (loaded by v1a.html)
 // ============================================================
 
-import { WORLD_W, WORLD_H, PLAYER_SPEED, PLAYER_RADIUS, PLAYER_MAX_HP, XP_MAGNET_RANGE, XP_MAGNET_SPEED } from './shared/constants.js';
+import { WORLD_W, WORLD_H, PLAYER_SPEED, PLAYER_RADIUS, PLAYER_MAX_HP, XP_MAGNET_RANGE, XP_MAGNET_SPEED, XP_START, XP_LEVEL_SCALE } from './shared/constants.js';
+import { sfx, setSfxVol as _setSfxVol, getSfxVol, getAudioCtx as getAudio } from './shared/sfx.js';
+import { installKeyboardInput } from './shared/input.js';
+import { makeBgmPlayer } from './shared/bgm.js';
 import { WEAPON_ICONS, createWeapon } from './shared/weapons.js';
 import { createRng } from './shared/sim/rng.js';
 import { EVT } from './shared/sim/events.js';
@@ -11,15 +14,17 @@ import { spawnEnemy } from './shared/sim/enemies.js';
 import { POWERUPS, getAvailableChoices } from './shared/sim/powerups.js';
 import { tickSim } from './shared/sim/tick.js';
 import { escapeHTML } from './shared/htmlEscape.js';
-import { MAPS } from './shared/maps.js';
+import { MAPS, resolveMapObstacles } from './shared/maps.js';
 import { pushOutOfObstacles } from './shared/sim/collision.js';
 import { buildBackgroundCanvas } from './shared/tileBackground.js';
 import { loadObstacleSprites, drawObstacle, drawNeonBackground } from './shared/obstacleSprites.js';
 import { UNLOCKS, calculateScales, loadPrestige, savePrestige, applyPrestigeUnlocks, toggleCosmetic } from './shared/prestige.js';
-import { makeDrawSprite, drawHpBar, drawParticles, drawFloatingTexts, drawChainEffects, drawMeteorEffects, drawPlayerBody, drawFacingIndicator, drawChargeTrail, spawnFireTrail, renderWorld } from './shared/render.js';
+import { makeDrawSprite, drawHpBar, drawParticles, drawFloatingTexts, drawChainEffects, drawMeteorEffects, drawPendingPulls, drawPlayerBody, drawFacingIndicator, drawChargeTrail, spawnFireTrail, renderWorld } from './shared/render.js';
 import { synthesizeView } from './shared/view.js';
 import { applySimEvent } from './shared/simEventHandler.js';
 import { markSeen, getBestiaryEntries } from './shared/bestiary.js';
+import { ACHIEVEMENTS, loadAchievements, grantAchievement } from './shared/achievements.js';
+import { saveRunEntry } from './shared/runHistory.js';
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -50,263 +55,10 @@ spriteSheet.onload = () => { spritesReady = true; };
 const drawSprite = makeDrawSprite(ctx, spriteSheet, () => spritesReady);
 
 // --- sound effects (Web Audio API) ---
-let audioCtx = null;
-function getAudio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  return audioCtx;
-}
-
-function sfx(type) {
-  try {
-    const ac = getAudio();
-    const t = ac.currentTime;
-    const osc = ac.createOscillator();
-    const gain = ac.createGain();
-    osc.connect(gain);
-    gain.connect(ac.destination);
-
-    switch (type) {
-      case 'hit': // enemy takes damage — short blip
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(220, t);
-        osc.frequency.linearRampToValueAtTime(110, t + 0.06);
-        gain.gain.setValueAtTime(0.08, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.06);
-        osc.start(t); osc.stop(t + 0.06);
-        break;
-
-      case 'kill': // enemy dies — satisfying pop
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(400, t);
-        osc.frequency.linearRampToValueAtTime(800, t + 0.08);
-        gain.gain.setValueAtTime(0.12, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.1);
-        osc.start(t); osc.stop(t + 0.1);
-        break;
-
-      case 'xp': // gem pickup — tiny chime
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(880, t);
-        osc.frequency.linearRampToValueAtTime(1320, t + 0.06);
-        gain.gain.setValueAtTime(0.06, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.08);
-        osc.start(t); osc.stop(t + 0.08);
-        break;
-
-      case 'levelup': { // level up — ascending arpeggio
-        gain.gain.setValueAtTime(0, t); // silence main osc
-        osc.start(t); osc.stop(t + 0.01);
-        const notes = [523, 659, 784, 1047]; // C5 E5 G5 C6
-        notes.forEach((freq, i) => {
-          const o = ac.createOscillator();
-          const g = ac.createGain();
-          o.connect(g); g.connect(ac.destination);
-          o.type = 'triangle';
-          o.frequency.setValueAtTime(freq, t + i * 0.08);
-          g.gain.setValueAtTime(0.1, t + i * 0.08);
-          g.gain.linearRampToValueAtTime(0, t + i * 0.08 + 0.12);
-          o.start(t + i * 0.08);
-          o.stop(t + i * 0.08 + 0.12);
-        });
-        break;
-      }
-
-      case 'playerhit': // player takes damage — harsh buzz
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(150, t);
-        osc.frequency.linearRampToValueAtTime(80, t + 0.12);
-        gain.gain.setValueAtTime(0.15, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.15);
-        osc.start(t); osc.stop(t + 0.15);
-        break;
-
-      case 'death': { // player death — descending doom
-        gain.gain.setValueAtTime(0, t);
-        osc.start(t); osc.stop(t + 0.01);
-        const freqs = [440, 330, 220, 110];
-        freqs.forEach((freq, i) => {
-          const o = ac.createOscillator();
-          const g = ac.createGain();
-          o.connect(g); g.connect(ac.destination);
-          o.type = 'sawtooth';
-          o.frequency.setValueAtTime(freq, t + i * 0.15);
-          o.frequency.linearRampToValueAtTime(freq * 0.7, t + i * 0.15 + 0.15);
-          g.gain.setValueAtTime(0.12, t + i * 0.15);
-          g.gain.linearRampToValueAtTime(0, t + i * 0.15 + 0.18);
-          o.start(t + i * 0.15);
-          o.stop(t + i * 0.15 + 0.18);
-        });
-        break;
-      }
-
-      case 'spit': // projectile fire — pew
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(600, t);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.07);
-        gain.gain.setValueAtTime(0.05, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.07);
-        osc.start(t); osc.stop(t + 0.07);
-        break;
-
-      case 'chain': // chain lightning — electric zap
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(1200, t);
-        osc.frequency.linearRampToValueAtTime(300, t + 0.05);
-        osc.frequency.linearRampToValueAtTime(900, t + 0.08);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.12);
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.12);
-        osc.start(t); osc.stop(t + 0.12);
-        break;
-
-      case 'meteor': // meteor drop — deep rumble whomp
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(60, t);
-        osc.frequency.linearRampToValueAtTime(40, t + 0.2);
-        gain.gain.setValueAtTime(0.18, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.25);
-        osc.start(t); osc.stop(t + 0.25);
-        break;
-
-      case 'dragonstorm': { // dragon storm — deep roar + high sizzle
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(100, t);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.1);
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.15);
-        osc.start(t); osc.stop(t + 0.15);
-        const o2 = ac.createOscillator();
-        const g2 = ac.createGain();
-        o2.connect(g2); g2.connect(ac.destination);
-        o2.type = 'square';
-        o2.frequency.setValueAtTime(800, t + 0.03);
-        o2.frequency.linearRampToValueAtTime(400, t + 0.1);
-        g2.gain.setValueAtTime(0.06, t + 0.03);
-        g2.gain.linearRampToValueAtTime(0, t + 0.12);
-        o2.start(t + 0.03); o2.stop(t + 0.12);
-        break;
-      }
-
-      case 'charge': { // bull rush — woosh + impact thud
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(150, t);
-        osc.frequency.linearRampToValueAtTime(300, t + 0.08);
-        osc.frequency.linearRampToValueAtTime(80, t + 0.15);
-        gain.gain.setValueAtTime(0.15, t);
-        gain.gain.linearRampToValueAtTime(0.08, t + 0.08);
-        gain.gain.linearRampToValueAtTime(0, t + 0.2);
-        osc.start(t); osc.stop(t + 0.2);
-        break;
-      }
-
-      case 'hive_burst': { // spawner births swarmlings — organic squelchy burst
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(180, t);
-        osc.frequency.linearRampToValueAtTime(90, t + 0.08);
-        osc.frequency.linearRampToValueAtTime(200, t + 0.12);
-        osc.frequency.linearRampToValueAtTime(60, t + 0.2);
-        gain.gain.setValueAtTime(0.12, t);
-        gain.gain.linearRampToValueAtTime(0.08, t + 0.08);
-        gain.gain.linearRampToValueAtTime(0, t + 0.2);
-        osc.start(t); osc.stop(t + 0.2);
-        // high squelch layer
-        const hb2 = ac.createOscillator();
-        const hg2 = ac.createGain();
-        hb2.connect(hg2); hg2.connect(ac.destination);
-        hb2.type = 'square';
-        hb2.frequency.setValueAtTime(500, t + 0.02);
-        hb2.frequency.linearRampToValueAtTime(250, t + 0.1);
-        hb2.frequency.linearRampToValueAtTime(600, t + 0.15);
-        hg2.gain.setValueAtTime(0.04, t + 0.02);
-        hg2.gain.linearRampToValueAtTime(0, t + 0.18);
-        hb2.start(t + 0.02); hb2.stop(t + 0.18);
-        break;
-      }
-
-      case 'boss_telegraph': { // boss about to charge — rising growl warning
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(60, t);
-        osc.frequency.linearRampToValueAtTime(180, t + 0.25);
-        gain.gain.setValueAtTime(0.05, t);
-        gain.gain.linearRampToValueAtTime(0.18, t + 0.2);
-        gain.gain.linearRampToValueAtTime(0, t + 0.3);
-        osc.start(t); osc.stop(t + 0.3);
-        // high screech overtone
-        const bt2 = ac.createOscillator();
-        const bg2 = ac.createGain();
-        bt2.connect(bg2); bg2.connect(ac.destination);
-        bt2.type = 'square';
-        bt2.frequency.setValueAtTime(300, t + 0.1);
-        bt2.frequency.linearRampToValueAtTime(600, t + 0.25);
-        bg2.gain.setValueAtTime(0.03, t + 0.1);
-        bg2.gain.linearRampToValueAtTime(0.08, t + 0.22);
-        bg2.gain.linearRampToValueAtTime(0, t + 0.3);
-        bt2.start(t + 0.1); bt2.stop(t + 0.3);
-        break;
-      }
-
-      case 'boss_step': { // boss footstep — heavy thud
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(50, t);
-        osc.frequency.linearRampToValueAtTime(30, t + 0.1);
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0, t + 0.12);
-        osc.start(t); osc.stop(t + 0.12);
-        break;
-      }
-
-      case 'shield_hum': { // barrier shield pulse — resonant hum
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(220, t);
-        osc.frequency.linearRampToValueAtTime(260, t + 0.06);
-        osc.frequency.linearRampToValueAtTime(220, t + 0.12);
-        gain.gain.setValueAtTime(0.05, t);
-        gain.gain.linearRampToValueAtTime(0.08, t + 0.04);
-        gain.gain.linearRampToValueAtTime(0, t + 0.12);
-        osc.start(t); osc.stop(t + 0.12);
-        break;
-      }
-
-      case 'heal': { // health pickup — warm ascending chime
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(523, t);
-        osc.frequency.linearRampToValueAtTime(784, t + 0.1);
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0.06, t + 0.08);
-        gain.gain.linearRampToValueAtTime(0, t + 0.15);
-        osc.start(t); osc.stop(t + 0.15);
-        const ho2 = ac.createOscillator();
-        const hg2 = ac.createGain();
-        ho2.connect(hg2); hg2.connect(ac.destination);
-        ho2.type = 'sine';
-        ho2.frequency.setValueAtTime(659, t + 0.05);
-        ho2.frequency.linearRampToValueAtTime(1047, t + 0.15);
-        hg2.gain.setValueAtTime(0.06, t + 0.05);
-        hg2.gain.linearRampToValueAtTime(0, t + 0.2);
-        ho2.start(t + 0.05); ho2.stop(t + 0.2);
-        break;
-      }
-
-      case 'zap': { // lightning field strike — sharp crackling zap
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(2000, t);
-        osc.frequency.linearRampToValueAtTime(600, t + 0.03);
-        osc.frequency.linearRampToValueAtTime(1800, t + 0.05);
-        osc.frequency.linearRampToValueAtTime(400, t + 0.08);
-        gain.gain.setValueAtTime(0.07, t);
-        gain.gain.linearRampToValueAtTime(0.04, t + 0.03);
-        gain.gain.linearRampToValueAtTime(0.06, t + 0.05);
-        gain.gain.linearRampToValueAtTime(0, t + 0.08);
-        osc.start(t); osc.stop(t + 0.08);
-        break;
-      }
-
-      default:
-        gain.gain.setValueAtTime(0, t);
-        osc.start(t); osc.stop(t + 0.01);
-    }
-  } catch (e) { /* audio not available, that's fine */ }
-}
+// sfx() + audio context + master gain live in shared/sfx.js so MP
+// gets the same switch (was missing several cases). getAudio is
+// imported under that name so the existing BGM call sites don't
+// have to change.
 
 // --- analytics (fire-and-forget, never blocks gameplay) ---
 const ANALYTICS_URL = 'https://survivors-analytics.sammcgrail.workers.dev';
@@ -320,91 +72,89 @@ window.addEventListener('beforeunload', () => {
   track({ type: 'session_end', duration_ms: Date.now() - sessionStart });
 });
 
-// --- battle music (map-aware + mute toggle) ---
+// --- music system (menu + battle, map-aware + mute toggle) ---
 const MAP_TRACKS = {
   arena: 'arena_theme.ogg',
   neon: 'neon_grid.ogg',
   forest: 'forest_theme.ogg',
   graveyard: 'graveyard_theme.ogg',
   ruins: 'ruins_theme.ogg',
+  // Procedural maps reuse their thematic parent's track — wilderness is
+  // a forest variant, catacombs a ruins variant.
+  wilderness: 'forest_theme.ogg',
+  catacombs: 'ruins_theme.ogg',
 };
+const MENU_TRACK = 'menu_theme.ogg';
 const DEFAULT_TRACK_OGG = 'survivors_battle.ogg';
-const DEFAULT_TRACK_MP3 = 'survivors_battle.mp3';
-const MUSIC_VOL = 0.35;
+// BGM volume — persisted per-slider in localStorage. SFX volume
+// lives in shared/sfx.js (since the gain node is created there).
+let bgmVol = 0.45;
+try { const v = localStorage.getItem('survivors_bgm_vol'); if (v !== null) bgmVol = +v; } catch (_) {}
+const MENU_VOL_RATIO = 0.67; // menu music plays at 67% of bgm slider
 
-let bgMusic = null;
-let bgMusicGain = null;
-let musicFading = false;
-let currentTrackSrc = null;
+let menuMusicStarted = false;
 let musicMuted = false;
 try { musicMuted = localStorage.getItem('survivors_mute') === '1'; } catch (_) {}
 function updateMuteBtn() {
   const b = document.getElementById('mute-btn');
   if (b) b.textContent = musicMuted ? '🔇' : '🔊';
 }
+function initVolSliders() {
+  const bs = document.getElementById('vol-bgm');
+  const ss = document.getElementById('vol-sfx');
+  if (bs) bs.value = Math.round(bgmVol * 100);
+  if (ss) ss.value = Math.round(getSfxVol() * 100);
+}
 updateMuteBtn();
+initVolSliders();
+
+function setBgmVol(v) {
+  bgmVol = Math.max(0, Math.min(1, v / 100));
+  try { localStorage.setItem('survivors_bgm_vol', bgmVol.toFixed(2)); } catch (_) {}
+  if (!musicMuted) {
+    battlePlayer.setVol(bgmVol);
+    menuPlayer.setVol(bgmVol * MENU_VOL_RATIO);
+  }
+}
+function setSfxVol(v) {
+  // Slider is 0..100; shared module owns persistence + gain wiring.
+  _setSfxVol(Math.max(0, Math.min(1, v / 100)));
+}
+function toggleVolPanel() {
+  const p = document.getElementById('vol-panel');
+  if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
+}
+
+// Menu music — plays on the start/death screen. Fades out when game
+// starts, fades back in on return. Barn's E dorian 78 BPM ambient.
+// fadeIn keeps the audio element loaded so the track resumes from
+// where it was paused instead of restarting from 0:00.
+const battlePlayer = makeBgmPlayer();
+const menuPlayer = makeBgmPlayer();
+
+function startMenuMusic() {
+  if (menuMusicStarted) return;
+  menuPlayer.play(MENU_TRACK, musicMuted ? 0 : bgmVol * MENU_VOL_RATIO);
+  menuMusicStarted = true;
+}
+function fadeOutMenuMusic() { menuPlayer.fadeOut(); }
+function fadeInMenuMusic() {
+  menuPlayer.play(MENU_TRACK, musicMuted ? 0 : bgmVol * MENU_VOL_RATIO);
+}
 
 function startMusic() {
-  try {
-    const ac = getAudio();
-    if (ac.state === 'suspended') ac.resume();
-    // Pick track for current map.
-    const mapId = (game && game.mapId) || selectedMapId || 'arena';
-    const canOgg = !bgMusic || (bgMusic.canPlayType && bgMusic.canPlayType('audio/ogg; codecs=vorbis'));
-    let src = MAP_TRACKS[mapId] || (canOgg ? DEFAULT_TRACK_OGG : DEFAULT_TRACK_MP3);
-    // If track changed, tear down old audio element (createMediaElementSource
-    // binds permanently to one AudioContext, can't reassign .src safely).
-    if (bgMusic && currentTrackSrc !== src) {
-      bgMusic.pause();
-      bgMusic = null;
-      bgMusicGain = null;
-    }
-    if (!bgMusic) {
-      bgMusic = new Audio();
-      bgMusic.loop = true;
-      bgMusic.volume = 1; // volume via gain node
-      bgMusic.src = src;
-      currentTrackSrc = src;
-      const mediaSrc = ac.createMediaElementSource(bgMusic);
-      bgMusicGain = ac.createGain();
-      bgMusicGain.gain.value = 0;
-      mediaSrc.connect(bgMusicGain);
-      bgMusicGain.connect(ac.destination);
-    }
-    bgMusic.currentTime = 0;
-    bgMusic.play().catch(() => {});
-    // fade in over 2s (skip if muted)
-    const target = musicMuted ? 0 : MUSIC_VOL;
-    bgMusicGain.gain.cancelScheduledValues(ac.currentTime);
-    bgMusicGain.gain.setValueAtTime(0, ac.currentTime);
-    bgMusicGain.gain.linearRampToValueAtTime(target, ac.currentTime + 2);
-    musicFading = false;
-  } catch (e) {}
+  const mapId = (game && game.mapId) || selectedMapId || 'arena';
+  const src = MAP_TRACKS[mapId] || DEFAULT_TRACK_OGG;
+  battlePlayer.play(src, musicMuted ? 0 : bgmVol);
 }
-
-function fadeOutMusic() {
-  if (!bgMusic || !bgMusicGain || musicFading) return;
-  musicFading = true;
-  try {
-    const ac = getAudio();
-    bgMusicGain.gain.cancelScheduledValues(ac.currentTime);
-    bgMusicGain.gain.setValueAtTime(bgMusicGain.gain.value, ac.currentTime);
-    bgMusicGain.gain.linearRampToValueAtTime(0, ac.currentTime + 1.5);
-    setTimeout(() => { bgMusic.pause(); musicFading = false; }, 1600);
-  } catch (e) {}
-}
+function fadeOutMusic() { battlePlayer.fadeOut(); }
 
 function toggleMuteMusic() {
   musicMuted = !musicMuted;
   try { localStorage.setItem('survivors_mute', musicMuted ? '1' : '0'); } catch (_) {}
   updateMuteBtn();
-  if (bgMusicGain) {
-    try {
-      const ac = getAudio();
-      bgMusicGain.gain.cancelScheduledValues(ac.currentTime);
-      bgMusicGain.gain.linearRampToValueAtTime(musicMuted ? 0 : MUSIC_VOL, ac.currentTime + 0.3);
-    } catch (_) {}
-  }
+  battlePlayer.setVol(musicMuted ? 0 : bgmVol, 0.3);
+  menuPlayer.setVol(musicMuted ? 0 : bgmVol * MENU_VOL_RATIO, 0.3);
 }
 
 // --- resize ---
@@ -422,35 +172,72 @@ let keys = { up: false, down: false, left: false, right: false };
 let analogMove = { x: 0, y: 0 }; // smooth analog input from touch
 let paused = false;
 let selectedWeapon = 'spit'; // default starting weapon
-let selectedMapId = 'neon';    // default map (code-rendered abstract grid)
+let selectedMapId = 'random';  // default: random pick each game
+
+const MAP_LABELS = {
+  random:     { label: 'Random',  icon: '🎲' },
+  arena:      { label: 'Arena',   icon: '⚔️' },
+  forest:     { label: 'Forest',  icon: '🌲' },
+  ruins:      { label: 'Ruins',   icon: '🏛️' },
+  neon:       { label: 'Neon',    icon: '⚡' },
+  wilderness: { label: 'Wild',    icon: '🌿' },
+  catacombs:  { label: 'Tombs',   icon: '💀' },
+  graveyard:  { label: 'Graves',  icon: '⚰️' },
+};
+
+function renderMapPicker() {
+  const container = document.getElementById('map-picker-cards');
+  if (!container) return;
+  container.innerHTML = '';
+  const options = ['random', ...Object.keys(MAPS)];
+  for (const id of options) {
+    const meta = MAP_LABELS[id] || { label: id, icon: '🗺️' };
+    const card = document.createElement('div');
+    card.className = `map-card${selectedMapId === id ? ' map-card--selected' : ''}`;
+    card.innerHTML = `<span style="font-size:18px">${meta.icon}</span><span style="font-size:11px">${meta.label}</span>`;
+    card.addEventListener('click', () => selectMap(id));
+    container.appendChild(card);
+  }
+}
 
 function selectWeapon(type) {
   selectedWeapon = type;
+  startMenuMusic(); // first interaction triggers audio context
   document.querySelectorAll('.weapon-card').forEach(c => {
     c.classList.toggle('selected', c.dataset.weapon === type);
   });
 }
-// Map dropdown handler. Persists choice across reloads via localStorage
-// so users don't have to re-pick every time. Bundle loads at end of
-// body, so the DOM lookup below is safe to run synchronously.
+// Map picker handler. Accepts 'random' or any MAPS key. Persists
+// choice in localStorage; bundle loads at end of body so DOM is ready.
 function selectMap(id) {
-  if (!MAPS[id]) return;
+  if (id !== 'random' && !MAPS[id]) return;
   selectedMapId = id;
   try { localStorage.setItem('survivors_map', id); } catch (e) {}
+  renderMapPicker();
 }
 try {
   const saved = localStorage.getItem('survivors_map');
-  if (saved && MAPS[saved]) {
-    selectedMapId = saved;
-    const el = document.getElementById('map-select');
-    if (el) el.value = saved;
-  }
+  if (saved && (saved === 'random' || MAPS[saved])) selectedMapId = saved;
 } catch (e) {}
+renderMapPicker();
 let gameStarted = false;
+
+// --- achievements ---
+let achievements = loadAchievements(); // persists across sessions in localStorage
+let sessionNewUnlocks = [];            // ids unlocked this run (drives toast queue)
 
 // --- init game ---
 function initGame() {
-  const map = MAPS[selectedMapId] || MAPS.arena;
+  const mapKeys = Object.keys(MAPS);
+  const resolvedMapId = (selectedMapId === 'random' || !MAPS[selectedMapId])
+    ? mapKeys[Math.floor(Math.random() * mapKeys.length)]
+    : selectedMapId;
+  const map = MAPS[resolvedMapId];
+  // rng hoisted out of the game literal so procedural obstacles can
+  // share the same seed — deterministic layouts + deterministic spawns
+  // off one roll.
+  const rng = createRng(Date.now() & 0x7fffffff);
+  const obstacles = resolveMapObstacles(map, rng);
   const p = {
     x: WORLD_W / 2,
     y: WORLD_H / 2,
@@ -467,7 +254,7 @@ function initGame() {
     sizeMulti: 1,
     armor: 0,
     xp: 0,
-    xpToLevel: 45,
+    xpToLevel: XP_START,
     level: 1,
     weapons: [createWeapon(selectedWeapon)], // start with chosen weapon
     alive: true,
@@ -485,7 +272,7 @@ function initGame() {
   // thresholds to match and queue a level-up choice for the bonus level.
   const prestigeLevels = p.level - 1;
   if (prestigeLevels > 0) {
-    for (let i = 0; i < prestigeLevels; i++) p.xpToLevel = Math.floor(p.xpToLevel * 1.30);
+    for (let i = 0; i < prestigeLevels; i++) p.xpToLevel = Math.floor(p.xpToLevel * XP_LEVEL_SCALE);
   }
 
   return {
@@ -495,6 +282,8 @@ function initGame() {
     projectiles: [],
     gems: [],
     heartDrops: [],
+    consumables: [],
+    enemyProjectiles: [],
     particles: [],
     floatingTexts: [],
     time: 0,
@@ -516,16 +305,17 @@ function initGame() {
     // events here; client handles sfx/particles/HUD flashes from the
     // queue. See src/shared/sim/events.js for the EVT enum.
     events: [],
-    rng: createRng(Date.now() & 0x7fffffff),
+    rng,
     // Visual effect arrays — chain bolts and meteor warn/explode rings.
     // Eager-init here so sim modules don't need defensive `|| []` checks.
     chainEffects: [],
     meteorEffects: [],
+    chargeTrails: [],
     // Map state — `arena` overrides the global WORLD dims; `obstacles`
     // is consumed by sim/collision.js and rendered by the canvas pass.
     arena: { w: map.width, h: map.height },
-    obstacles: map.obstacles,
-    mapId: selectedMapId,
+    obstacles,
+    mapId: resolvedMapId,
     // Active cosmetics from prestige (read once at game start)
     _activeSkin: loadPrestige().activeSkin,
     _activeTrail: loadPrestige().activeTrail,
@@ -634,9 +424,28 @@ function update(dt) {
   // spawns, screen shake triggers); client decides what to do. Empty
   // until PR #12 starts emitting from extracted sim code.
   if (g.events.length > 0) {
-    for (const evt of g.events) applySimEvent(evt, spEventClient);
+    for (const evt of g.events) {
+      applySimEvent(evt, spEventClient);
+      // Achievement checks on per-event triggers.
+      if (evt.type === 'enemyKilled') {
+        unlockAchievement('first_blood');
+        if (evt.name === 'boss') unlockAchievement('boss_slayer');
+      } else if (evt.type === 'levelUp' && evt.level >= 10) {
+        unlockAchievement('level_10');
+      } else if (evt.type === 'evolution') {
+        unlockAchievement('evolved');
+      }
+    }
     g.events.length = 0;
   }
+
+  // State-based milestone checks (run every frame, idempotent via grantAchievement).
+  if (g.wave >= 10)  unlockAchievement('wave_10');
+  if (g.wave >= 20)  unlockAchievement('wave_20');
+  if (g.kills >= 100)  unlockAchievement('kills_100');
+  if (g.kills >= 1000) unlockAchievement('kills_1000');
+  if (p.weapons.length >= 4) unlockAchievement('full_loadout');
+  if (g.time >= 300) unlockAchievement('survivor_5min');
 }
 
 // SP event-client shim — drains g.events via the shared
@@ -661,6 +470,11 @@ const spEventClient = {
 };
 
 // --- level up UI ---
+// Returns the `stats` string from the catalog entry, or '' if absent.
+function formatUpgradeStat(choice) {
+  return choice.stats || '';
+}
+
 function showLevelUp(g) {
   sfx('levelup');
   paused = true;
@@ -683,14 +497,29 @@ function showLevelUp(g) {
   window._levelChoices = [];
   for (let ci = 0; ci < choices.length; ci++) {
     const choice = choices[ci];
+    const isEvo = !!choice.requiresEvo;
     const div = document.createElement('div');
-    div.className = 'choice';
+    div.className = 'choice' + (isEvo ? ' choice--evo' : '');
     div.innerHTML = `
       <div class="name"><span style="color:#555;font-size:0.6rem">[${ci+1}]</span> ${choice.icon} ${choice.name}</div>
       <div class="desc">${choice.desc}</div>
     `;
+    if (isEvo) {
+      const badge = document.createElement('div');
+      badge.className = 'choice-evo-badge';
+      badge.textContent = '✦ EVOLUTION';
+      div.prepend(badge);
+    }
+    const statText = formatUpgradeStat(choice);
+    if (statText) {
+      const statsEl = document.createElement('div');
+      statsEl.className = 'choice-stats';
+      statsEl.textContent = statText;
+      div.appendChild(statsEl);
+    }
     const pick = () => {
       stacks[choice.id] = (stacks[choice.id] || 0) + 1;
+      if (choice.requiresEvo) unlockAchievement('evolved');
       choice.apply(g, g.player);
       document.getElementById('level-up').style.display = 'none';
       paused = false;
@@ -708,6 +537,29 @@ function showLevelUp(g) {
   }
 }
 
+// Show a brief achievement-unlock toast in the bottom-centre of the screen.
+function showAchievementToast(id) {
+  const def = ACHIEVEMENTS.find(a => a.id === id);
+  if (!def) return;
+  const toast = document.createElement('div');
+  toast.className = 'achievement-toast';
+  toast.innerHTML = `<span class="ach-icon">${def.icon}</span> <span class="ach-label">Achievement: ${def.label}</span>`;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.classList.add('achievement-toast--visible'), 50);
+  setTimeout(() => {
+    toast.classList.remove('achievement-toast--visible');
+    setTimeout(() => toast.remove(), 400);
+  }, 3000);
+}
+
+// Grant an achievement and show a toast if newly unlocked.
+function unlockAchievement(id) {
+  if (grantAchievement(achievements, id)) {
+    sessionNewUnlocks.push(id);
+    showAchievementToast(id);
+  }
+}
+
 function getBestRun() {
   try {
     const raw = localStorage.getItem('survivors_best');
@@ -720,7 +572,9 @@ function saveBestRun(run) {
 }
 
 function showDeathScreen(g) {
+  const history = saveRunEntry(g);
   fadeOutMusic();
+  fadeInMenuMusic();
   track({ type: 'death', wave: g.wave, kills: g.kills, weapons: g.player.weapons.map(w => w.type) });
   const mins = Math.floor(g.time / 60);
   const secs = Math.floor(g.time % 60);
@@ -858,6 +712,48 @@ function showDeathScreen(g) {
     <div class="scales-total">Total: ${prestige.scales} scales</div>
   `;
 
+  // Achievement badges row — persist across runs, greyed when locked.
+  let achEl = document.getElementById('ds-achievements');
+  if (!achEl) {
+    achEl = document.createElement('div');
+    achEl.id = 'ds-achievements';
+    achEl.style.cssText = 'margin-top:12px;margin-bottom:4px;display:flex;flex-wrap:wrap;gap:6px;justify-content:center;';
+    document.getElementById('death-scales').after(achEl);
+  }
+  achEl.innerHTML = '';
+  const allAch = loadAchievements();
+  for (const def of ACHIEVEMENTS) {
+    const badge = document.createElement('span');
+    badge.className = `ds-ach-badge${allAch[def.id] ? '' : ' ds-ach-badge--locked'}`;
+    badge.title = `${def.label}: ${def.desc}${allAch[def.id] ? '' : ' (locked)'}`;
+    badge.textContent = allAch[def.id] ? def.icon : '🔒';
+    achEl.appendChild(badge);
+  }
+
+  // Run history panel — current run is index 0 (just saved by saveRunEntry above).
+  let histEl = document.getElementById('ds-history');
+  if (!histEl) {
+    histEl = document.createElement('div');
+    histEl.id = 'ds-history';
+    achEl.after(histEl);
+  }
+  histEl.innerHTML = '<div class="ds-history-title">Recent Runs</div>';
+  for (const run of history) {
+    const min = Math.floor(run.time / 60);
+    const sec = (run.time % 60 | 0).toString().padStart(2, '0');
+    const weaponIcons = run.weapons.map(t => WEAPON_ICONS[t] ?? '⚔️').join(' ');
+    const row = document.createElement('div');
+    row.className = 'ds-history-row';
+    row.innerHTML = `
+      <span class="dhr-wave">W${run.wave}</span>
+      <span class="dhr-kills">${run.kills}k</span>
+      <span class="dhr-level">Lv${run.level}</span>
+      <span class="dhr-time">${min}:${sec}</span>
+      <span class="dhr-weapons">${weaponIcons}</span>
+    `;
+    histEl.appendChild(row);
+  }
+
   document.getElementById('death-screen').style.display = 'flex';
 }
 
@@ -867,6 +763,7 @@ function render() {
   const H = canvas.height;
   const g = game;
   if (!g) return;
+  if (PERF_ON) _phaseT = performance.now();
 
   ctx.save();
   ctx.fillStyle = '#0a0a0f';
@@ -924,14 +821,17 @@ function render() {
     if (obs.x + obs.w < cx || obs.x > cx + W || obs.y + obs.h < cy || obs.y > cy + H) continue;
     drawObstacle(ctx, obs);
   }
+  _phase('bg');
 
   const p = g.player;
   renderWorld(ctx, synthesizeView(g), drawSprite, g.particles,
               { cx, cy, W, H },
-              { onSeen: (name) => markSeen(name, g.wave) });
+              { onSeen: (name) => markSeen(name, g.wave), onPhase: PERF_ON ? _phase : null });
   drawChargeTrail(ctx, g.players);
   drawChainEffects(ctx, g.chainEffects);
   drawMeteorEffects(ctx, g.meteorEffects);
+  drawPendingPulls(ctx, g.pendingPulls);
+  _phase('worldfx');
 
   // --- player ---
   if (p.alive) {
@@ -958,10 +858,13 @@ function render() {
 
     drawHpBar(ctx, p.x, p.y - p.radius - 10, 30, p.hp / p.maxHp);
   }
+  _phase('player');
 
   drawParticles(ctx, g.particles);
+  _phase('particles');
 
   drawFloatingTexts(ctx, g.floatingTexts);
+  _phase('floats');
 
   ctx.restore();
 
@@ -1033,48 +936,26 @@ function render() {
     ctx.fillRect(0, 0, W, H);
     ctx.restore();
   }
+  _phase('hud');
 
 }
 
 // --- input ---
-const KEY_MAP = {
-  'w': 'up', 'arrowup': 'up',
-  's': 'down', 'arrowdown': 'down',
-  'a': 'left', 'arrowleft': 'left',
-  'd': 'right', 'arrowright': 'right',
-};
-
-document.addEventListener('keydown', e => {
-  // level-up keyboard shortcuts
-  if (paused && window._levelChoices && window._levelChoices.length > 0) {
-    const num = parseInt(e.key);
-    if (num >= 1 && num <= window._levelChoices.length) {
-      window._levelChoices[num - 1]();
-      e.preventDefault();
-      return;
-    }
-  }
-  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
-  const k = KEY_MAP[e.key.toLowerCase()];
-  if (k) { keys[k] = true; e.preventDefault(); }
+// Keyboard handlers + KEY_MAP live in shared/input.js. Level-up
+// callback gates on `paused` (SP's pause flag = level-up overlay
+// is open). `onClear` resets analog joystick state too — the
+// joystick itself stays inline below since SP needs analog
+// magnitude that MP doesn't (MP only sends boolean keys to server).
+installKeyboardInput(keys, {
+  onLevelUpKey(idx) {
+    if (!paused || !window._levelChoices) return false;
+    const pick = window._levelChoices[idx];
+    if (!pick) return false;
+    pick();
+    return true;
+  },
+  onClear() { analogMove.x = 0; analogMove.y = 0; },
 });
-
-document.addEventListener('keyup', e => {
-  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
-  const k = KEY_MAP[e.key.toLowerCase()];
-  if (k) { keys[k] = false; e.preventDefault(); }
-});
-
-// Clear all input on blur / tab hide. Without this, holding a key, alt-tabbing,
-// and releasing it while the page is hidden leaves the key permanently "down"
-// — player drifts forever after returning. Mobile home-button does the same.
-function clearAllInput() {
-  keys.up = keys.down = keys.left = keys.right = false;
-  analogMove.x = 0;
-  analogMove.y = 0;
-}
-window.addEventListener('blur', clearAllInput);
-document.addEventListener('visibilitychange', () => { if (document.hidden) clearAllInput(); });
 
 // --- mobile invisible touch joystick ---
 const joyZone = document.getElementById('joystick-zone');
@@ -1155,13 +1036,70 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 // --- game loop (unified: update + render in single rAF to prevent camera/render desync) ---
 let lastTime = 0;
 
+// Lightweight perf-profile harness — opt-in via ?perf=1. Samples
+// update() vs render() vs each render phase (background, world,
+// players, hud) into rolling buckets and logs avg/p95/max every
+// 120 frames. Off by default so production has zero overhead
+// beyond a single boolean check per gameLoop call.
+const PERF_ON = typeof location !== 'undefined' && /[?&]perf=1\b/.test(location.search);
+const _perfBuckets = PERF_ON ? Object.create(null) : null;
+let _perfFrames = 0;
+let _phaseT = 0; // last phase boundary timestamp, reset at render start
+
+function _perfMark(label, ms) {
+  let b = _perfBuckets[label];
+  if (!b) { b = _perfBuckets[label] = []; }
+  b.push(ms);
+  if (b.length > 600) b.shift(); // keep last ~10s at 60fps
+}
+
+// Call between render phases to close out the previous bucket. No-op
+// unless PERF_ON. Keeps the call-site ergonomic: `_phase('world')`.
+function _phase(label) {
+  if (!PERF_ON) return;
+  const n = performance.now();
+  _perfMark('r.' + label, n - _phaseT);
+  _phaseT = n;
+}
+
+function _perfReport() {
+  const out = ['[perf]'];
+  for (const label of Object.keys(_perfBuckets)) {
+    const b = _perfBuckets[label];
+    if (b.length === 0) continue;
+    const sorted = [...b].sort((a, b) => a - b);
+    const avg = b.reduce((s, x) => s + x, 0) / b.length;
+    const p95 = sorted[Math.floor(sorted.length * 0.95)];
+    const max = sorted[sorted.length - 1];
+    out.push(`${label}: avg=${avg.toFixed(2)} p95=${p95.toFixed(2)} max=${max.toFixed(2)}`);
+  }
+  console.log(out.join('  '));
+}
+
 function gameLoop(ts) {
   if (lastTime === 0) lastTime = ts; // prevent huge dt spike on first frame
   const dt = Math.min((ts - lastTime) / 1000, 0.05); // cap at 50ms
   lastTime = ts;
-  update(dt);
-  render();
+  if (PERF_ON) {
+    const t0 = performance.now();
+    update(dt);
+    const t1 = performance.now();
+    render();
+    const t2 = performance.now();
+    _perfMark('update', t1 - t0);
+    _perfMark('render', t2 - t1);
+    _perfMark('frame',  t2 - t0);
+    if (++_perfFrames % 120 === 0) _perfReport();
+  } else {
+    update(dt);
+    render();
+  }
   requestAnimationFrame(gameLoop);
+}
+
+// Expose a quick console hook for ad-hoc profiling: window._perf.report()
+if (PERF_ON && typeof window !== 'undefined') {
+  window._perf = { mark: _perfMark, report: _perfReport, buckets: _perfBuckets };
 }
 
 // --- prestige shop ---
@@ -1218,6 +1156,8 @@ function startGame() {
   hidePrestigeShop();
   document.getElementById('level-up').style.display = 'none';
   paused = false;
+  sessionNewUnlocks = [];
+  achievements = loadAchievements(); // refresh in case another tab updated it
   game = initGame();
   // Headstart prestige: queue level-up choices for bonus levels so the
   // player picks a perk immediately on game start.
@@ -1226,6 +1166,7 @@ function startGame() {
   }
   const nameEl = document.getElementById('name-input');
   if (nameEl && nameEl.value.trim()) game.playerName = nameEl.value.trim();
+  fadeOutMenuMusic();
   startMusic();
   track({ type: 'game_start' });
   // Load this map's ground tileset (async — render falls back to grid
@@ -1246,6 +1187,7 @@ document.addEventListener('keydown', e => {
   const startVisible = startScreen.style.display !== 'none' && startScreen.offsetParent !== null;
   const deathVisible = deathScreen.style.display === 'flex';
   if (startVisible) {
+    startMenuMusic(); // any key on start screen triggers audio
     if (e.key === '1') selectWeapon('spit');
     else if (e.key === '2') selectWeapon('breath');
     else if (e.key === '3') selectWeapon('charge');
@@ -1275,6 +1217,9 @@ window.hidePrestigeShop = hidePrestigeShop;
 window.purchaseUnlock = purchaseUnlock;
 window.toggleCosmeticEquip = toggleCosmeticEquip;
 window.toggleMute = toggleMuteMusic;
+window.setBgmVol = setBgmVol;
+window.setSfxVol = setSfxVol;
+window.toggleVolPanel = toggleVolPanel;
 window.showBestiary = showBestiary;
 window.hideBestiary = hideBestiary;
 
