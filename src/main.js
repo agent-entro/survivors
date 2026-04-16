@@ -16,7 +16,7 @@ import { pushOutOfObstacles } from './shared/sim/collision.js';
 import { buildBackgroundCanvas } from './shared/tileBackground.js';
 import { loadObstacleSprites, drawObstacle, drawNeonBackground } from './shared/obstacleSprites.js';
 import { UNLOCKS, calculateScales, loadPrestige, savePrestige, applyPrestigeUnlocks, toggleCosmetic } from './shared/prestige.js';
-import { makeDrawSprite, drawHpBar, drawParticles, drawFloatingTexts, drawChainEffects, drawMeteorEffects, drawPlayerBody, drawFacingIndicator, drawChargeTrail, spawnFireTrail, renderWorld } from './shared/render.js';
+import { makeDrawSprite, drawHpBar, drawParticles, drawFloatingTexts, drawChainEffects, drawMeteorEffects, drawPendingPulls, drawPlayerBody, drawFacingIndicator, drawChargeTrail, spawnFireTrail, renderWorld } from './shared/render.js';
 import { synthesizeView } from './shared/view.js';
 import { applySimEvent } from './shared/simEventHandler.js';
 import { markSeen, getBestiaryEntries } from './shared/bestiary.js';
@@ -521,6 +521,7 @@ function initGame() {
     // Eager-init here so sim modules don't need defensive `|| []` checks.
     chainEffects: [],
     meteorEffects: [],
+    pendingPulls: [],
     // Map state — `arena` overrides the global WORLD dims; `obstacles`
     // is consumed by sim/collision.js and rendered by the canvas pass.
     arena: { w: map.width, h: map.height },
@@ -932,6 +933,7 @@ function render() {
   drawChargeTrail(ctx, g.players);
   drawChainEffects(ctx, g.chainEffects);
   drawMeteorEffects(ctx, g.meteorEffects);
+  drawPendingPulls(ctx, g.pendingPulls);
 
   // --- player ---
   if (p.alive) {

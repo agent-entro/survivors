@@ -33,6 +33,7 @@ function fireWeapon(g, w, p) {
   else if (w.type === 'thunder_god')  fireThunderGod(g, w, p);
   else if (w.type === 'meteor_orbit') fireMeteor(g, w, p);
   else if (w.type === 'fortress')     fireCharge(g, w, p);
+  else if (w.type === 'void_anchor')  fireVoidAnchor(g, w, p);
 }
 
 function fireSpit(g, w, p) {
@@ -409,6 +410,68 @@ function fortressShockwave(g, w, p) {
     color: w.color, owner: p.id,
   });
   emit(g, EVT.METEOR_EXPLODE, { x: p.x, y: p.y, color: w.color, radius: w.shockwaveRadius });
+}
+
+// --- Void Anchor ---
+// Meteor + Chain fusion. On fire: chain-style opener (baseDamage to nearest
+// enemy in range), then 0.55s gravitational pull dragging all enemies inward
+// (queued to g.pendingPulls), then a 110-damage crushing impact at 0.7s
+// (queued to g.meteorEffects with warnLife:0.7 so the renderer normalises
+// the warn streak correctly against the non-standard delay).
+function fireVoidAnchor(g, w, p) {
+  emit(g, EVT.WEAPON_FIRE, { weapon: 'void_anchor', pid: p.id });
+
+  // Chain-style opener — hit nearest enemy within pull radius immediately
+  const pullR = w.pullRadius * (p.sizeMulti || 1);
+  const nearest = g.enemies
+    .filter(e => Math.hypot(e.x - p.x, e.y - p.y) < pullR)
+    .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0];
+  if (nearest) damageEnemy(g, nearest, w.baseDamage * p.damageMulti, p.id);
+
+  // Gravitational pull: drags all enemies in range inward for 0.55s
+  if (!g.pendingPulls) g.pendingPulls = [];
+  g.pendingPulls.push({
+    x: p.x, y: p.y,
+    radius: pullR,
+    strength: w.pullStrength,
+    duration: 0.55,
+    elapsed: 0,
+  });
+
+  // Crushing impact after pull resolves (0.7s). warnLife tells the renderer
+  // the full warn phase duration so the streak normalises correctly.
+  const impactR = w.impactRadius * (p.sizeMulti || 1);
+  g.meteorEffects.push({
+    x: p.x, y: p.y,
+    radius: impactR,
+    damage: w.impactDamage * p.damageMulti,
+    life: 0.7, warnLife: 0.7,
+    phase: 'warn',
+    color: w.color,
+    owner: p.id,
+  });
+  emit(g, EVT.METEOR_WARN, { x: p.x, y: p.y, radius: impactR });
+}
+
+// Tick gravitational pulls — moves enemies inward each frame.
+// Called from tick.js after updateEnemies so positions are settled.
+export function updatePendingPulls(g, dt) {
+  if (!g.pendingPulls || g.pendingPulls.length === 0) return;
+  for (let i = g.pendingPulls.length - 1; i >= 0; i--) {
+    const pull = g.pendingPulls[i];
+    pull.elapsed += dt;
+    const r2 = pull.radius * pull.radius;
+    for (const e of g.enemies) {
+      const dx = pull.x - e.x;
+      const dy = pull.y - e.y;
+      if (dx * dx + dy * dy > r2) continue;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const force = pull.strength * dt;
+      e.x += (dx / d) * force;
+      e.y += (dy / d) * force;
+    }
+    if (pull.elapsed >= pull.duration) g.pendingPulls.splice(i, 1);
+  }
 }
 
 // --- chain + meteor effect lifetimes ---
