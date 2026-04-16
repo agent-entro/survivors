@@ -5,6 +5,7 @@
 // ============================================================
 
 import { WEAPON_ICONS } from './shared/weapons.js';
+import { PLAYER_RADIUS } from './shared/constants.js';
 import { escapeHTML } from './shared/htmlEscape.js';
 import { buildBackgroundCanvas } from './shared/tileBackground.js';
 import { loadObstacleSprites, drawObstacle, drawNeonBackground } from './shared/obstacleSprites.js';
@@ -159,6 +160,111 @@ function sfx(type) {
         g2.gain.setValueAtTime(0.06, t + 0.03);
         g2.gain.linearRampToValueAtTime(0, t + 0.12);
         o2.start(t + 0.03); o2.stop(t + 0.12);
+        break;
+      }
+      case 'charge': { // bull rush — woosh + impact thud
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(150, t);
+        osc.frequency.linearRampToValueAtTime(300, t + 0.08);
+        osc.frequency.linearRampToValueAtTime(80, t + 0.15);
+        gain.gain.setValueAtTime(0.15, t);
+        gain.gain.linearRampToValueAtTime(0.08, t + 0.08);
+        gain.gain.linearRampToValueAtTime(0, t + 0.2);
+        osc.start(t); osc.stop(t + 0.2);
+        break;
+      }
+      case 'hive_burst': { // spawner births swarmlings — organic squelchy burst
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(180, t);
+        osc.frequency.linearRampToValueAtTime(90, t + 0.08);
+        osc.frequency.linearRampToValueAtTime(200, t + 0.12);
+        osc.frequency.linearRampToValueAtTime(60, t + 0.2);
+        gain.gain.setValueAtTime(0.12, t);
+        gain.gain.linearRampToValueAtTime(0.08, t + 0.08);
+        gain.gain.linearRampToValueAtTime(0, t + 0.2);
+        osc.start(t); osc.stop(t + 0.2);
+        const hb2 = ac.createOscillator();
+        const hg2 = ac.createGain();
+        hb2.connect(hg2); hg2.connect(ac.destination);
+        hb2.type = 'square';
+        hb2.frequency.setValueAtTime(500, t + 0.02);
+        hb2.frequency.linearRampToValueAtTime(250, t + 0.1);
+        hb2.frequency.linearRampToValueAtTime(600, t + 0.15);
+        hg2.gain.setValueAtTime(0.04, t + 0.02);
+        hg2.gain.linearRampToValueAtTime(0, t + 0.18);
+        hb2.start(t + 0.02); hb2.stop(t + 0.18);
+        break;
+      }
+      case 'boss_telegraph': { // boss about to charge — rising growl warning
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(60, t);
+        osc.frequency.linearRampToValueAtTime(180, t + 0.25);
+        gain.gain.setValueAtTime(0.05, t);
+        gain.gain.linearRampToValueAtTime(0.18, t + 0.2);
+        gain.gain.linearRampToValueAtTime(0, t + 0.3);
+        osc.start(t); osc.stop(t + 0.3);
+        const bt2 = ac.createOscillator();
+        const bg2 = ac.createGain();
+        bt2.connect(bg2); bg2.connect(ac.destination);
+        bt2.type = 'square';
+        bt2.frequency.setValueAtTime(300, t + 0.1);
+        bt2.frequency.linearRampToValueAtTime(600, t + 0.25);
+        bg2.gain.setValueAtTime(0.03, t + 0.1);
+        bg2.gain.linearRampToValueAtTime(0.08, t + 0.22);
+        bg2.gain.linearRampToValueAtTime(0, t + 0.3);
+        bt2.start(t + 0.1); bt2.stop(t + 0.3);
+        break;
+      }
+      case 'boss_step': { // boss footstep — heavy thud
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(50, t);
+        osc.frequency.linearRampToValueAtTime(30, t + 0.1);
+        gain.gain.setValueAtTime(0.1, t);
+        gain.gain.linearRampToValueAtTime(0, t + 0.12);
+        osc.start(t); osc.stop(t + 0.12);
+        break;
+      }
+      case 'shield_hum': { // barrier shield pulse — resonant hum
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(220, t);
+        osc.frequency.linearRampToValueAtTime(260, t + 0.06);
+        osc.frequency.linearRampToValueAtTime(220, t + 0.12);
+        gain.gain.setValueAtTime(0.05, t);
+        gain.gain.linearRampToValueAtTime(0.08, t + 0.04);
+        gain.gain.linearRampToValueAtTime(0, t + 0.12);
+        osc.start(t); osc.stop(t + 0.12);
+        break;
+      }
+      case 'heal': { // health pickup — warm ascending chime
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(523, t);
+        osc.frequency.linearRampToValueAtTime(784, t + 0.1);
+        gain.gain.setValueAtTime(0.1, t);
+        gain.gain.linearRampToValueAtTime(0.06, t + 0.08);
+        gain.gain.linearRampToValueAtTime(0, t + 0.15);
+        osc.start(t); osc.stop(t + 0.15);
+        const ho2 = ac.createOscillator();
+        const hg3 = ac.createGain();
+        ho2.connect(hg3); hg3.connect(ac.destination);
+        ho2.type = 'sine';
+        ho2.frequency.setValueAtTime(659, t + 0.05);
+        ho2.frequency.linearRampToValueAtTime(1047, t + 0.15);
+        hg3.gain.setValueAtTime(0.06, t + 0.05);
+        hg3.gain.linearRampToValueAtTime(0, t + 0.2);
+        ho2.start(t + 0.05); ho2.stop(t + 0.2);
+        break;
+      }
+      case 'zap': { // lightning field strike — sharp crackling zap
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(2000, t);
+        osc.frequency.linearRampToValueAtTime(600, t + 0.03);
+        osc.frequency.linearRampToValueAtTime(1800, t + 0.05);
+        osc.frequency.linearRampToValueAtTime(400, t + 0.08);
+        gain.gain.setValueAtTime(0.07, t);
+        gain.gain.linearRampToValueAtTime(0.04, t + 0.03);
+        gain.gain.linearRampToValueAtTime(0.06, t + 0.05);
+        gain.gain.linearRampToValueAtTime(0, t + 0.08);
+        osc.start(t); osc.stop(t + 0.08);
         break;
       }
       default:
@@ -721,7 +827,7 @@ function render(dt) {
 
     const isMe = pl.id === myId;
     if (pl.x < cx - 60 || pl.x > cx + W + 60 || pl.y < cy - 60 || pl.y > cy + H + 60) continue;
-    const playerRadius = 14;
+    const playerRadius = PLAYER_RADIUS; // use shared constant — was hardcoded 14
     const skin = pl.activeSkin;
     const glowColor = skin === 'skin_gold' ? '#f39c12'
                     : skin === 'skin_shadow' ? '#9b59b6'
@@ -933,10 +1039,10 @@ joyZone.addEventListener('touchmove', e => {
     const nx = dist > 0 ? dx / dist : 0;
     const ny = dist > 0 ? dy / dist : 0;
     if (dist > JOY_DEAD) {
-      keys.left = nx < -0.4;
-      keys.right = nx > 0.4;
-      keys.up = ny < -0.4;
-      keys.down = ny > 0.4;
+      keys.left = nx < -0.3;
+      keys.right = nx > 0.3;
+      keys.up = ny < -0.3;
+      keys.down = ny > 0.3;
     } else {
       keys.left = keys.right = keys.up = keys.down = false;
     }
