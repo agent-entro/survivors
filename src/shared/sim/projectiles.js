@@ -1,6 +1,6 @@
-// Projectile movement, range cleanup, enemy collision, and obstacle
-// blocking. Pure sim; damage routes through damage.js + events.
-import { damageEnemy } from './damage.js';
+// Projectile movement, range cleanup, and obstacle blocking.
+// Enemy collision is handled by checkBulletEnemyCollisions in collision.js,
+// called from tick.js with a shared spatial hash after this function runs.
 import { circleRectCollision } from './collision.js';
 import { PROJECTILE_BLOCKERS } from '../maps.js';
 
@@ -31,24 +31,6 @@ export function updateProjectiles(g, dt) {
     if (blocked) {
       g.projectiles.splice(i, 1);
       continue;
-    }
-
-    // Look up owner once per projectile, not per enemy collision.
-    const owner = g.players.find(p => p.id === proj.owner);
-    const dmg = proj.damage * (owner ? owner.damageMulti : 1);
-
-    for (let j = g.enemies.length - 1; j >= 0; j--) {
-      const e = g.enemies[j];
-      const edx = proj.x - e.x;
-      const edy = proj.y - e.y;
-      if (edx * edx + edy * edy < (proj.radius + e.radius) ** 2) {
-        damageEnemy(g, e, dmg, proj.owner);
-        proj.pierce--;
-        if (proj.pierce <= 0) {
-          g.projectiles.splice(i, 1);
-          break;
-        }
-      }
     }
   }
 }

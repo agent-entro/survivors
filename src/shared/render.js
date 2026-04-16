@@ -19,6 +19,7 @@
 // array for SP's visual trail — documented at the call site.
 
 import { SP, SPRITE_SIZE } from './sprites.js';
+import { drawBar } from './hudBar.js';
 
 // Bind a drawSprite() to a specific canvas + sheet. SP and MP each
 // build one at module load. Returns false if the sheet hasn't loaded
@@ -73,10 +74,7 @@ export function drawSkinAura(ctx, x, y, radius, skin, time, alpha = 1) {
 // HP bar, top-left at (x - w/2, yTop). Color flips red below 30%.
 // Caller passes height + bg (defaults are the common 4×#222 player bar).
 export function drawHpBar(ctx, x, yTop, w, hpFrac, height = 4, bg = '#222') {
-  ctx.fillStyle = bg;
-  ctx.fillRect(x - w / 2, yTop, w, height);
-  ctx.fillStyle = hpFrac > 0.3 ? '#2ecc71' : '#e74c3c';
-  ctx.fillRect(x - w / 2, yTop, w * Math.max(0, hpFrac), height);
+  drawBar(ctx, x, yTop, w, height, hpFrac, { bg });
 }
 
 // Decorative-only floating text — fade alpha with remaining life.
@@ -118,7 +116,8 @@ const ENEMY_NAME_TO_SPRITE = { ghost: 'skull' };
 // Optional `onSeen(name)` is called once per visible non-dying enemy
 // — SP wires this to the bestiary discovery hook so playing
 // continuously builds out the catalog.
-export function drawEnemies(ctx, enemies, drawSprite, cx, cy, W, H, onSeen) {
+export function drawEnemies(ctx, enemies, drawSprite, cx, cy, W, H, onSeen, particles) {
+  const now = typeof performance !== 'undefined' ? performance.now() : 0;
   for (const e of enemies) {
     if (e.x < cx - 50 || e.x > cx + W + 50 || e.y < cy - 50 || e.y > cy + H + 50) continue;
     const spriteName = e.sprite || ENEMY_NAME_TO_SPRITE[e.name] || e.name;
@@ -141,16 +140,19 @@ export function drawEnemies(ctx, enemies, drawSprite, cx, cy, W, H, onSeen) {
     if (onSeen) onSeen(e.name);
 
     if (!drawSprite(spriteName, e.x, e.y, e.radius / 8)) {
-      ctx.fillStyle = e.color;
-      ctx.beginPath();
-      ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
-      ctx.fill();
+      drawEnemyFallback(ctx, e, now);
     }
     if (e.hitFlash > 0) {
-      ctx.fillStyle = `rgba(255,255,255,${Math.min(e.hitFlash * 5, 0.6)})`;
-      ctx.beginPath();
-      ctx.arc(e.x, e.y, e.radius * 0.8, 0, Math.PI * 2);
-      ctx.fill();
+      drawHitFlashLayers(ctx, e);
+    }
+
+    // Status tint — persistent overlay while a status is active.
+    // STATUS_APPLIED particle pop fires once on apply (in the event
+    // channel); this layer keeps the visual up so players reading
+    // the battlefield can tell which enemies are slowed/burning/
+    // frozen at a glance instead of having to remember.
+    if (e.statusEffects && e.statusEffects.length > 0) {
+      drawStatusTint(ctx, e, particles);
     }
 
     if (e.hp < e.maxHp) {
@@ -159,11 +161,207 @@ export function drawEnemies(ctx, enemies, drawSprite, cx, cy, W, H, onSeen) {
   }
 }
 
+// Fallback renderer for enemies without a sprite (poisoner / splitter /
+// bomber / healer added after the original sprite sheet). Goes beyond a
+// flat colored circle — outline ring + main fill + per-type animated
+// detail so they read as distinct creatures. All detail is procedural
+// against `performance.now()` + per-enemy offsets so there's no state
+// per enemy and the call is O(1) per enemy.
+function drawEnemyFallback(ctx, e, now) {
+  const r = e.radius;
+  // Outline ring — slightly darker than the fill, 1.5px wide.
+  ctx.strokeStyle = shadeHex(e.color, -0.35);
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
+  ctx.stroke();
+  // Main fill.
+  ctx.fillStyle = e.color;
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, r - 0.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (e.name === 'poisoner') {
+    // Shimmering spiky rim — 8 spikes that rotate and breathe, toxic feel.
+    const t = now / 400 + e.x * 0.01;
+    ctx.fillStyle = shadeHex(e.color, 0.35);
+    for (let i = 0; i < 8; i++) {
+      const a = t + (Math.PI * 2 * i) / 8;
+      const spikeR = r + 1.5 + Math.sin(t * 2 + i) * 1.2;
+      ctx.beginPath();
+      ctx.arc(e.x + Math.cos(a) * spikeR, e.y + Math.sin(a) * spikeR, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (e.name === 'splitter') {
+    // Lumpy body — 3 offset inner lobes that pulse, suggests it's
+    // about to split.
+    const t = now / 300 + e.x * 0.02;
+    ctx.fillStyle = shadeHex(e.color, 0.2);
+    for (let i = 0; i < 3; i++) {
+      const a = t + (Math.PI * 2 * i) / 3;
+      const offR = r * 0.45;
+      const lobeR = r * (0.35 + Math.sin(t * 3 + i) * 0.08);
+      ctx.beginPath();
+      ctx.arc(e.x + Math.cos(a) * offR, e.y + Math.sin(a) * offR, lobeR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (e.name === 'bomber') {
+    // Ticking fuse dot — bright core that throbs faster as hp drops,
+    // visual "it's about to explode" cue.
+    const hpFrac = e.hp / e.maxHp;
+    const tickRate = 220 - (1 - hpFrac) * 180; // throb faster at low hp
+    const pulse = 0.55 + Math.sin(now / tickRate + e.x * 0.03) * 0.45;
+    ctx.fillStyle = `rgba(255, 220, 120, ${pulse})`;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y - r * 0.15, r * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+    // Fuse line running up from the top
+    ctx.strokeStyle = 'rgba(120, 60, 30, 0.9)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(e.x, e.y - r * 0.6);
+    ctx.lineTo(e.x + Math.sin(now / 200) * 1.5, e.y - r * 1.1);
+    ctx.stroke();
+  } else if (e.name === 'healer') {
+    // Cross-shaped inner glow + 4 orbiting motes. Reads as medical.
+    const t = now / 500 + e.x * 0.008;
+    ctx.fillStyle = 'rgba(220, 255, 235, 0.9)';
+    const armR = r * 0.55;
+    const armW = r * 0.18;
+    ctx.fillRect(e.x - armW / 2, e.y - armR, armW, armR * 2);
+    ctx.fillRect(e.x - armR, e.y - armW / 2, armR * 2, armW);
+    ctx.fillStyle = 'rgba(220, 255, 235, 0.7)';
+    for (let i = 0; i < 4; i++) {
+      const a = t + (Math.PI * 2 * i) / 4;
+      const orbR = r * 1.15;
+      ctx.beginPath();
+      ctx.arc(e.x + Math.cos(a) * orbR, e.y + Math.sin(a) * orbR, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else {
+    // Generic fallback — 1 inner highlight dot so even unnamed new
+    // enemies pick up a hint of depth for free.
+    ctx.fillStyle = shadeHex(e.color, 0.35);
+    ctx.beginPath();
+    ctx.arc(e.x - r * 0.25, e.y - r * 0.25, r * 0.22, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// Multi-stage hit flash. Was a single semi-opaque overlay. Now:
+//   fresh hit  — bright core + radial crack streaks
+//   mid decay  — dimmer overlay + fading streaks
+//   tail       — last tint only
+// Reads as a multi-frame response instead of a single fade.
+function drawHitFlashLayers(ctx, e) {
+  const hf = e.hitFlash;
+  // Bright core — visible only fresh (first ~0.15s)
+  if (hf > 0.6) {
+    ctx.fillStyle = `rgba(255,255,255,${Math.min(hf * 0.9, 0.9)})`;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, e.radius * 0.8, 0, Math.PI * 2);
+    ctx.fill();
+    // 4 short crack streaks radiating out — only on fresh hits.
+    ctx.strokeStyle = `rgba(255,255,255,${hf * 0.7})`;
+    ctx.lineWidth = 1.3;
+    for (let i = 0; i < 4; i++) {
+      const a = (Math.PI * 2 * i) / 4 + (e.x * 0.03);
+      const r0 = e.radius * 0.3;
+      const r1 = e.radius * (0.95 + hf * 0.35);
+      ctx.beginPath();
+      ctx.moveTo(e.x + Math.cos(a) * r0, e.y + Math.sin(a) * r0);
+      ctx.lineTo(e.x + Math.cos(a) * r1, e.y + Math.sin(a) * r1);
+      ctx.stroke();
+    }
+  } else {
+    // Decay overlay only.
+    ctx.fillStyle = `rgba(255,255,255,${Math.min(hf * 5, 0.5)})`;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, e.radius * 0.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// Shift a #rrggbb color toward white (pct > 0) or black (pct < 0).
+// Clamped. Used for outline/inner highlight tinting off the enemy's
+// base color so every type keeps its identity.
+function shadeHex(hex, pct) {
+  const h = hex.startsWith('#') ? hex.slice(1) : hex;
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  const target = pct >= 0 ? 255 : 0;
+  const amt = Math.abs(pct);
+  const rr = Math.round(r + (target - r) * amt);
+  const gg = Math.round(g + (target - g) * amt);
+  const bb = Math.round(b + (target - b) * amt);
+  return `rgb(${rr},${gg},${bb})`;
+}
+
+// Per-status overlay drawn on top of the enemy sprite. Burn flickers
+// orange (sin-driven so it reads as flames), slow gets a steady blue
+// glow, freeze gets a cyan-white frost shell + 4 ice shards on the
+// rim. Multiple statuses stack — burn over slow over freeze.
+export function drawStatusTint(ctx, e, particles) {
+  for (const s of e.statusEffects) {
+    if (s.type === 'burn') {
+      const flick = 0.3 + Math.sin(performance.now() / 80 + e.x * 0.05) * 0.15;
+      ctx.fillStyle = `rgba(243, 156, 18, ${flick})`;
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, e.radius * 0.95, 0, Math.PI * 2);
+      ctx.fill();
+      // Continuous rising embers — small chance per frame per burning enemy.
+      // 0.04 (was 0.15) — at wave 25 with 30+ burning enemies the 0.15 rate
+      // was adding ~5 particles/frame/enemy. 0.04 keeps the visual read
+      // without flooding the particle buffer.
+      if (particles && Math.random() < 0.04) {
+        const ex = e.x + (Math.random() - 0.5) * e.radius * 1.2;
+        const ey = e.y + (Math.random() - 0.5) * e.radius * 0.4;
+        particles.push({
+          x: ex, y: ey,
+          vx: (Math.random() - 0.5) * 20,
+          vy: -40 - Math.random() * 30,
+          life: 0.5 + Math.random() * 0.3,
+          maxLife: 0.8,
+          radius: 1.4 + Math.random(),
+          color: Math.random() < 0.6 ? '#f39c12' : '#e74c3c',
+        });
+      }
+    } else if (s.type === 'slow') {
+      ctx.fillStyle = 'rgba(52, 152, 219, 0.25)';
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, e.radius * 0.95, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (s.type === 'freeze') {
+      ctx.fillStyle = 'rgba(173, 216, 230, 0.45)';
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, e.radius * 1.05, 0, Math.PI * 2);
+      ctx.fill();
+      // Ice shards on the rim — 4 evenly spaced little spikes.
+      ctx.fillStyle = '#e6f5fb';
+      for (let i = 0; i < 4; i++) {
+        const a = (Math.PI * 2 * i) / 4 + e.x * 0.02;
+        const sx = e.x + Math.cos(a) * e.radius * 0.95;
+        const sy = e.y + Math.sin(a) * e.radius * 0.95;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+}
+
 // Render a list of projectiles — 4-step trail sprites + main projectile
 // sprite with shadow glow, colored-circle fallback. If `particles` is
 // passed, drops occasional embers behind each projectile so the trail
 // reads through the sprite at high speed.
+//
+// Two-pass shadow batching: all trails (no shadow) first, then all glow
+// bodies in a single shadowBlur=14 / shadowBlur=0 bracket. Eliminates
+// 2×N ctx shadow state changes (one enable + one disable per projectile)
+// and replaces them with 2 total regardless of projectile count.
 export function drawProjectiles(ctx, projectiles, drawSprite, particles, cx, cy, W, H) {
+  // Pass 1 — trails + particle embers (no shadow state changes).
   for (const proj of projectiles) {
     if (proj.x < cx - 30 || proj.x > cx + W + 30 || proj.y < cy - 30 || proj.y > cy + H + 30) continue;
     const speed = Math.sqrt(proj.vx * proj.vx + proj.vy * proj.vy);
@@ -185,15 +383,6 @@ export function drawProjectiles(ctx, projectiles, drawSprite, particles, cx, cy,
         }
       }
     }
-    ctx.shadowColor = proj.color;
-    ctx.shadowBlur = 10;
-    if (!drawSprite('spit', proj.x, proj.y, 0.7)) {
-      ctx.fillStyle = proj.color;
-      ctx.beginPath();
-      ctx.arc(proj.x, proj.y, proj.radius, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.shadowBlur = 0;
     // Renderer-as-writer carve-out: we mutate the passed-in particles
     // array. The alternative (sim events for ember spawn) would ship
     // cosmetic noise across the wire for every MP client, which isn't
@@ -209,6 +398,105 @@ export function drawProjectiles(ctx, projectiles, drawSprite, particles, cx, cy,
       });
     }
   }
+  // Pass 2 — main glow bodies, batched by shadow color.
+  // shadowBlur is set once per color group instead of once per projectile.
+  ctx.shadowBlur = 14;
+  let lastColor = null;
+  for (const proj of projectiles) {
+    if (proj.x < cx - 30 || proj.x > cx + W + 30 || proj.y < cy - 30 || proj.y > cy + H + 30) continue;
+    if (proj.color !== lastColor) {
+      ctx.shadowColor = proj.color;
+      lastColor = proj.color;
+    }
+    if (!drawSprite('spit', proj.x, proj.y, 0.7)) {
+      ctx.fillStyle = proj.color;
+      ctx.beginPath();
+      ctx.arc(proj.x, proj.y, proj.radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Bright inner core on top of the sprite — small near-white dot
+    // that punches through at wave density when the body color gets
+    // lost in the swarm. No new shadow passes needed (shared blur state).
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.beginPath();
+    ctx.arc(proj.x, proj.y, proj.radius * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+}
+
+// Enemy projectiles — hostile orbs with a menacing red/purple glow
+// and a short ghostly trail. Visually distinct from player projectiles
+// so players can read incoming fire at a glance.
+//
+// `p.homing` (boss phase 3) gets an extra pulsing tracking ring so
+// players can tell "this one curves" without watching it for a beat.
+//
+// Same two-pass shadow batching as drawProjectiles — shadowBlur=12 is
+// set once before the body pass and cleared once after.
+export function drawEnemyProjectiles(ctx, projectiles, particles, cx, cy, W, H, time) {
+  // Pass 1 — trails + homing rings + spark particles (no shadow).
+  for (const p of projectiles) {
+    if (p.x < cx - 30 || p.x > cx + W + 30 || p.y < cy - 30 || p.y > cy + H + 30) continue;
+    const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+    // Ghostly trail
+    if (speed > 0) {
+      const nx = -p.vx / speed, ny = -p.vy / speed;
+      for (let t = 1; t <= 3; t++) {
+        ctx.globalAlpha = 0.25 - t * 0.07;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x + nx * t * 5, p.y + ny * t * 5, p.radius * (1 - t * 0.2), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+    // Homing tracking ring — pulses between r*1.4 and r*2.2 with a
+    // sin tied to time + position so adjacent homers don't pulse
+    // in sync. Outside the main body so it reads as targeting halo.
+    if (p.homing) {
+      const pulse = 1.4 + (Math.sin((time || 0) * 8 + p.x * 0.05) * 0.5 + 0.5) * 0.8;
+      ctx.strokeStyle = p.color;
+      ctx.globalAlpha = 0.45;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.radius * pulse, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    // Spark particles
+    if (particles && Math.random() < 0.3) {
+      particles.push({
+        x: p.x + (Math.random() - 0.5) * 4,
+        y: p.y + (Math.random() - 0.5) * 4,
+        vx: (Math.random() - 0.5) * 30,
+        vy: (Math.random() - 0.5) * 30,
+        life: 0.2, maxLife: 0.2,
+        radius: 1 + Math.random(),
+        color: p.color,
+      });
+    }
+  }
+  // Pass 2 — main glow bodies batched under one shadowBlur bracket.
+  ctx.shadowBlur = 12;
+  let lastColor = null;
+  for (const p of projectiles) {
+    if (p.x < cx - 30 || p.x > cx + W + 30 || p.y < cy - 30 || p.y > cy + H + 30) continue;
+    if (p.color !== lastColor) {
+      ctx.shadowColor = p.color;
+      lastColor = p.color;
+    }
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+    ctx.fill();
+    // White-hot core
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
 }
 
 // Chain-lightning effects — two passes per bolt (thick translucent
@@ -217,27 +505,79 @@ export function drawProjectiles(ctx, projectiles, drawSprite, particles, cx, cy,
 // weapon, lightning_field, thunder_god, fortress shockwave reuse.
 export function drawChainEffects(ctx, chainEffects) {
   for (const ce of chainEffects) {
-    const t = ce.life / 0.2;
-    ctx.shadowColor = ce.color;
-    for (let pass = 0; pass < 2; pass++) {
-      ctx.lineWidth = pass === 0 ? 6 : 2;
-      ctx.strokeStyle = pass === 0 ? ce.color : '#ffffff';
-      ctx.shadowBlur = pass === 0 ? 14 : 6;
-      ctx.globalAlpha = pass === 0 ? t * 0.45 : t;
+    // Two-phase: first 60% of life is the full jagged bolt; last 40%
+    // is residual crackle at each struck endpoint only. Reads as
+    // "impact → lingering spark" instead of a single jump-cut fade.
+    const maxLife = ce.maxLife || 0.2;
+    const lifeFrac = Math.max(0, ce.life / maxLife);
+    if (lifeFrac > 0.4) {
+      // Bolt phase — same jagged render as before but alpha mapped to
+      // the active window (0.4..1.0 fraction) so the bolt fades out
+      // before the residual takes over.
+      const t = (lifeFrac - 0.4) / 0.6;
+      ctx.shadowColor = ce.color;
+      for (let pass = 0; pass < 2; pass++) {
+        ctx.lineWidth = pass === 0 ? 6 : 2;
+        ctx.strokeStyle = pass === 0 ? ce.color : '#ffffff';
+        ctx.shadowBlur = pass === 0 ? 14 : 6;
+        ctx.globalAlpha = pass === 0 ? t * 0.45 : t;
+        for (let i = 0; i < ce.points.length - 1; i++) {
+          const a = ce.points[i];
+          const b = ce.points[i + 1];
+          const dx = (b.x - a.x), dy = (b.y - a.y);
+          const m1x = a.x + dx * 0.33 + (Math.random() - 0.5) * 18;
+          const m1y = a.y + dy * 0.33 + (Math.random() - 0.5) * 18;
+          const m2x = a.x + dx * 0.66 + (Math.random() - 0.5) * 18;
+          const m2y = a.y + dy * 0.66 + (Math.random() - 0.5) * 18;
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(m1x, m1y);
+          ctx.lineTo(m2x, m2y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+      }
+    } else {
+      // Residual phase — two passes.
+      //
+      // (1) Ghost afterimage: one thin straight line along the
+      // original bolt path, no jitter, faint white. Makes the zap
+      // legible at wave-30+ density where the jagged bolt fades
+      // faster than the eye can track. Cheap — one stroke per
+      // segment per frame. Cost per chainEffect in residual =
+      // (points.length - 1) strokes; typical chain = 3, so ≤3
+      // strokes/frame per effect.
+      //
+      // (2) Spark arcs at struck endpoints (existing behavior, kept
+      // for the "impact is still crackling" read).
+      const rf = lifeFrac / 0.4; // 1→0
+      ctx.shadowColor = ce.color;
+      ctx.shadowBlur = 4;
+      // (1) Ghost afterimage — static, straight, thin.
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.2;
+      ctx.globalAlpha = rf * 0.5;
       for (let i = 0; i < ce.points.length - 1; i++) {
         const a = ce.points[i];
         const b = ce.points[i + 1];
-        const dx = (b.x - a.x), dy = (b.y - a.y);
-        const m1x = a.x + dx * 0.33 + (Math.random() - 0.5) * 18;
-        const m1y = a.y + dy * 0.33 + (Math.random() - 0.5) * 18;
-        const m2x = a.x + dx * 0.66 + (Math.random() - 0.5) * 18;
-        const m2y = a.y + dy * 0.66 + (Math.random() - 0.5) * 18;
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
-        ctx.lineTo(m1x, m1y);
-        ctx.lineTo(m2x, m2y);
         ctx.lineTo(b.x, b.y);
         ctx.stroke();
+      }
+      // (2) Endpoint spark arcs — skip index 0 (source).
+      ctx.lineWidth = 1.3;
+      ctx.globalAlpha = rf * 0.8;
+      for (let i = 1; i < ce.points.length; i++) {
+        const p = ce.points[i];
+        for (let j = 0; j < 2; j++) {
+          const a = Math.random() * Math.PI * 2;
+          const len = 4 + Math.random() * 6;
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y);
+          ctx.lineTo(p.x + Math.cos(a) * len, p.y + Math.sin(a) * len);
+          ctx.stroke();
+        }
       }
     }
   }
@@ -247,14 +587,14 @@ export function drawChainEffects(ctx, chainEffects) {
 
 // Meteor warn + explode effects — falling streak above the warn ring,
 // dashed warn circle + pulsing center, expanding ring on explode.
-// Reused by meteor + meteor_orbit + fortress shockwave + enemy death
-// rings (all push to g.meteorEffects with the same shape).
+// Reused by meteor + meteor_orbit + fortress shockwave + void_anchor +
+// enemy death rings (all push to g.meteorEffects with the same shape).
 export function drawMeteorEffects(ctx, meteorEffects) {
   for (const m of meteorEffects) {
     if (m.phase === 'warn') {
       // Falling streak from off-screen down to the warn ring — sells
       // the "something's coming" beat before the explosion.
-      const t = 1 - (m.life / 0.5);
+      const warnDur = m.warnLife || 0.5; const t = Math.max(0, 1 - (m.life / warnDur));
       const streakStart = m.y - 480 * (1 - t);
       const grad = ctx.createLinearGradient(m.x, streakStart, m.x, m.y);
       grad.addColorStop(0,   'rgba(255, 99, 72, 0)');
@@ -503,6 +843,31 @@ export function drawWeaponAuras(ctx, players, time, viewport) {
         }
       }
 
+      // Charge cooldown indicator — red arc that fills as cooldown
+      // completes, so players know when the next dash is ready.
+      // Bright flash when fully charged. barnaldo feedback: players
+      // need visual clarity to play around the timing.
+      if ((w.type === 'charge' || w.type === 'fortress') && !w.active) {
+        const progress = Math.min(1, w.timer / w.cooldown);
+        if (progress < 1) {
+          const r = (p.radius || 14) + 6;
+          ctx.strokeStyle = 'rgba(231, 76, 60, 0.4)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+          ctx.stroke();
+        } else {
+          // Ready flash — subtle pulse when charge is available
+          const pulse = 0.3 + Math.sin(time * 6) * 0.15;
+          const r = (p.radius || 14) + 6;
+          ctx.strokeStyle = `rgba(231, 76, 60, ${pulse})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+
       if (w.type === 'fortress') {
         const ph = w.phase || 0;
         const r = w.shieldRadius * sm * (1 + Math.sin(ph) * 0.08);
@@ -534,17 +899,142 @@ export function drawWeaponAuras(ctx, players, time, viewport) {
           ctx.stroke();
         }
       }
+
+      if (w.type === 'inferno_wheel') {
+        const phase = w.phase || 0;
+        const orbitR = w.radius * sm;
+        const bladeR = w.bladeRadius * sm;
+        const count = w.bladeCount + pb;
+        for (let b = 0; b < count; b++) {
+          const angle = phase + (b * Math.PI * 2 / count);
+          const bx = p.x + Math.cos(angle) * orbitR;
+          const by = p.y + Math.sin(angle) * orbitR;
+          // Trailing ember arc behind the blade — three decaying
+          // after-images so the blade's path reads as swept fire.
+          for (let t = 1; t <= 3; t++) {
+            const ta = angle - t * 0.18;
+            const tx = p.x + Math.cos(ta) * orbitR;
+            const ty = p.y + Math.sin(ta) * orbitR;
+            ctx.globalAlpha = 0.35 / t;
+            ctx.fillStyle = t === 1 ? '#f39c12' : '#e74c3c';
+            ctx.beginPath();
+            ctx.arc(tx, ty, bladeR * (0.7 - t * 0.15), 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+          // Blade body — layered glow + hot core. No gradient object
+          // per blade (fillStyle rgba is cheaper than createRadialGradient
+          // and the profile flagged gradients as acceptable but still
+          // worth avoiding in a multi-blade loop).
+          ctx.fillStyle = 'rgba(231, 76, 60, 0.45)';
+          ctx.beginPath();
+          ctx.arc(bx, by, bladeR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = 'rgba(243, 156, 18, 0.75)';
+          ctx.beginPath();
+          ctx.arc(bx, by, bladeR * 0.65, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = 'rgba(255, 220, 150, 0.9)';
+          ctx.beginPath();
+          ctx.arc(bx, by, bladeR * 0.3 + Math.sin(time * 9 + b) * 1.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      if (w.type === 'tesla_aegis') {
+        const ph = w.phase || 0;
+        const pp = w.pulsePhase || 0;
+        const pc = w.pulseCount || 0;
+        // Overcharge tells: next pulse (pc+1) is the 4th → show brighter
+        // shell + rapid-flicker arcs. Mirrors thunder_god's tell pattern.
+        const overchargeReady = (pc + 1) % 4 === 0;
+        const r = w.shieldRadius * sm * (1 + Math.sin(ph) * 0.08);
+        const grad = ctx.createRadialGradient(p.x, p.y, r * 0.6, p.x, p.y, r);
+        if (overchargeReady) {
+          grad.addColorStop(0,   'rgba(200, 230, 255, 0.05)');
+          grad.addColorStop(0.6, 'rgba(255, 255, 255, 0.2)');
+          grad.addColorStop(1,   'rgba(178, 220, 255, 0.45)');
+        } else {
+          grad.addColorStop(0,   'rgba(116, 185, 255, 0)');
+          grad.addColorStop(0.7, 'rgba(116, 185, 255, 0.15)');
+          grad.addColorStop(1,   'rgba(178, 220, 255, 0.3)');
+        }
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = overchargeReady ? 'rgba(255, 255, 255, 0.95)' : 'rgba(178, 220, 255, 0.85)';
+        ctx.lineWidth = overchargeReady ? 3 : 2;
+        ctx.setLineDash([6, 5]);
+        ctx.lineDashOffset = -ph * 6;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineDashOffset = 0;
+        // Pulse preview ring — expands outward as pulseTimer counts
+        // down, giving players a tell for when the next zap fires.
+        const pulseFrac = 1 - Math.min(1, Math.max(0, (w.pulseTimer || 0) / w.pulseCooldown));
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.35 * (1 - pulseFrac)})`;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r * (0.5 + pulseFrac * 0.55), 0, Math.PI * 2);
+        ctx.stroke();
+        // Ambient arcs — denser when overcharge is next so the shield
+        // visibly crackles during the telegraph window.
+        const arcChance = overchargeReady ? 0.9 : 0.5;
+        if (Math.random() < arcChance) {
+          const a1 = Math.random() * Math.PI * 2;
+          const a2 = a1 + (Math.random() - 0.5) * 0.7;
+          const r1 = r * (0.3 + Math.random() * 0.6);
+          const r2 = r * (0.3 + Math.random() * 0.6);
+          ctx.strokeStyle = 'rgba(220, 240, 255, 0.6)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(p.x + Math.cos(a1) * r1, p.y + Math.sin(a1) * r1);
+          ctx.lineTo(p.x + Math.cos(a2) * r2, p.y + Math.sin(a2) * r2);
+          ctx.stroke();
+        }
+        ctx.fillStyle = '#eaf6ff';
+        for (let i = 0; i < 4; i++) {
+          const a = pp * 0.25 + (Math.PI * 2 / 4) * i;
+          ctx.beginPath();
+          ctx.arc(p.x + Math.cos(a) * r, p.y + Math.sin(a) * r, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
     }
   }
 }
 
-// Gem render: sprite when loaded, blue diamond fallback. Fallback
-// radius defaults to 6 (MP snapshot omits radius); SP passes
-// gem.radius for sim-side visuals.
+// Gem render: sprite when loaded, blue diamond fallback. Tier
+// scales the visual so high-XP drops (boss/elite) read distinct
+// from common swarm gems on the ground.
+//
+// Tier sources:
+//  - SP: gem.tier set at spawn time from the enemy that dropped it
+//    (spawnGem in sim/gems.js). Fallback: xp threshold for any gem
+//    that pre-dates the tiered spawn (migration safety).
+//  - MP: server ships gem.tier directly in the snapshot.
+//
+// 4 tiers per PR #114 — common / elite+spawner / brute / boss. Each
+// step up the scale AND the color saturation so late-game crowds
+// still read at a glance.
+const GEM_TIER_SCALE = [1, 1.5, 2.0, 2.8];
+const GEM_TIER_COLOR = ['#3498db', '#2ecc71', '#f39c12', '#9b59b6'];
+function gemTier(gem) {
+  if (gem.tier !== undefined) return gem.tier;
+  if (gem.xp >= 500) return 3;
+  if (gem.xp >= 200) return 2;
+  if (gem.xp >= 80) return 1;
+  return 0;
+}
 export function drawGem(ctx, gem, drawSprite, fallbackRadius = 6) {
-  if (drawSprite('gem', gem.x, gem.y, 0.9, 0.85)) return;
-  const r = gem.radius || fallbackRadius;
-  ctx.fillStyle = '#3498db';
+  const tier = gemTier(gem);
+  const scale = GEM_TIER_SCALE[tier];
+  if (drawSprite('gem', gem.x, gem.y, 0.9 * scale, 0.85)) return;
+  const r = (gem.radius || fallbackRadius) * scale;
+  ctx.fillStyle = GEM_TIER_COLOR[tier];
   ctx.globalAlpha = 0.8;
   ctx.beginPath();
   ctx.moveTo(gem.x, gem.y - r);
@@ -554,6 +1044,45 @@ export function drawGem(ctx, gem, drawSprite, fallbackRadius = 6) {
   ctx.closePath();
   ctx.fill();
   ctx.globalAlpha = 1;
+}
+
+// Consumable pickups — bomb/shield/magnet ground items. Drawn as
+// glowing circles with an icon, bob + late-life fade. Viewport-culled.
+const CONSUMABLE_ICONS = { bomb: '💣', shield: '🛡', magnet: '🧲' };
+export function drawConsumables(ctx, consumables, drawSprite, cx, cy, W, H) {
+  for (const c of consumables) {
+    if (c.x < cx - 20 || c.x > cx + W + 20 || c.y < cy - 20 || c.y > cy + H + 20) continue;
+    const bob = Math.sin(c.bobPhase) * 3;
+    const fadeAlpha = c.life < 3 ? c.life / 3 : 1;
+    const pulseScale = 1 + Math.sin(c.bobPhase * 2) * 0.1;
+    ctx.save();
+    ctx.globalAlpha = fadeAlpha;
+    // Outer glow
+    ctx.fillStyle = c.color;
+    ctx.globalAlpha = fadeAlpha * 0.25;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y + bob, c.radius * 2.2 * pulseScale, 0, Math.PI * 2);
+    ctx.fill();
+    // Inner circle
+    ctx.globalAlpha = fadeAlpha * 0.85;
+    ctx.fillStyle = c.color;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y + bob, c.radius * pulseScale, 0, Math.PI * 2);
+    ctx.fill();
+    // White border
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = fadeAlpha * 0.6;
+    ctx.stroke();
+    // Icon fallback (emoji text)
+    ctx.globalAlpha = fadeAlpha;
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `${Math.round(c.radius * 1.1)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(CONSUMABLE_ICONS[c.type] || '?', c.x, c.y + bob);
+    ctx.restore();
+  }
 }
 
 // Heart pickups — sprite with bob + late-life fade, triangle-rounded
@@ -677,14 +1206,106 @@ export function drawFacingIndicator(ctx, p, color, radius = 14) {
 // optional — SP wires it to the bestiary discovery hook.
 export function renderWorld(ctx, view, drawSprite, particles, viewport, opts = {}) {
   const { cx, cy, W, H } = viewport;
+  // Optional per-subphase marker for the SP perf harness. No-op in
+  // prod / MP. Caller supplies `onPhase(label)` which closes the
+  // previous bucket each time it's invoked.
+  const mark = opts.onPhase || null;
+  // Gem magnet trail — while a gem is inside any player's magnetRange,
+  // it's visibly flying toward them. Dropping a small trail particle
+  // behind the gem at ~8 per second reads as "in-flight" without the
+  // client having to track per-gem velocity. Gated to onscreen gems
+  // (viewport cull above) so offscreen magnet-sucks don't allocate.
+  const alivePlayers = view.players ? view.players.filter(p => p.alive) : [];
   for (const gem of view.gems) {
     if (gem.x < cx - 20 || gem.x > cx + W + 20 || gem.y < cy - 20 || gem.y > cy + H + 20) continue;
+    if (particles && alivePlayers.length > 0 && Math.random() < 0.13) {
+      // Nearest alive player — if within that player's magnetRange,
+      // spawn a trail particle at the gem that drifts back toward the
+      // gem's motion origin. magnetRange defaults apply when not
+      // present on snapshot.
+      let best = null, bestD2 = Infinity;
+      for (const p of alivePlayers) {
+        const dx = p.x - gem.x, dy = p.y - gem.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestD2) { best = p; bestD2 = d2; }
+      }
+      const magR = (best && best.magnetRange) || 80;
+      if (best && bestD2 < magR * magR) {
+        const dx = best.x - gem.x, dy = best.y - gem.y;
+        const d = Math.sqrt(bestD2) || 1;
+        // Trail points BACKWARD along the flight vector so it streams
+        // behind the gem as it moves toward the player.
+        particles.push({
+          x: gem.x - (dx / d) * 4,
+          y: gem.y - (dy / d) * 4,
+          vx: -(dx / d) * 18 + (Math.random() - 0.5) * 14,
+          vy: -(dy / d) * 18 + (Math.random() - 0.5) * 14,
+          life: 0.3, maxLife: 0.3,
+          radius: 1.2 + Math.random() * 0.6,
+          color: '#5dade2',
+        });
+      }
+    }
     drawGem(ctx, gem, drawSprite);
   }
   drawHeartDrops(ctx, view.heartDrops || [], drawSprite, cx, cy, W, H);
+  drawConsumables(ctx, view.consumables || [], drawSprite, cx, cy, W, H);
+  if (mark) mark('gems');
+  drawChargeTrailWake(ctx, view.chargeTrails || [], particles, view.time || 0, viewport);
   drawWeaponAuras(ctx, view.players, view.time || 0, viewport);
-  drawEnemies(ctx, view.enemies, drawSprite, cx, cy, W, H, opts.onSeen);
+  if (mark) mark('auras');
+  drawEnemies(ctx, view.enemies, drawSprite, cx, cy, W, H, opts.onSeen, particles);
+  if (mark) mark('enemies');
   drawProjectiles(ctx, view.projectiles, drawSprite, particles, cx, cy, W, H);
+  drawEnemyProjectiles(ctx, view.enemyProjectiles || [], particles, cx, cy, W, H, view.time || 0);
+  if (mark) mark('projectiles');
+}
+
+// Charge fire-wake render — lingering damage zones left behind a
+// charge dash. Was a flat alpha-fading circle; now flickers like
+// fire and occasionally drops upward-drifting embers so it reads
+// as a real burning patch instead of a transparent disc.
+function drawChargeTrailWake(ctx, trails, particles, time, viewport) {
+  const { cx, cy, W, H } = viewport;
+  for (const t of trails) {
+    if (t.x < cx - t.radius || t.x > cx + W + t.radius ||
+        t.y < cy - t.radius || t.y > cy + H + t.radius) continue;
+    // Per-trail offset so two adjacent trails don't flicker in sync.
+    const flicker = 0.85 + Math.sin(time * 9 + t.x * 0.05) * 0.15;
+    const baseAlpha = Math.min(1, t.life * 1.5) * 0.4;
+    ctx.save();
+    ctx.globalAlpha = baseAlpha * flicker;
+    ctx.fillStyle = t.color || '#e74c3c';
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, t.radius, 0, Math.PI * 2);
+    ctx.fill();
+    // Bright flickering core — shifted half a step out of phase
+    // so the inner heat doesn't pulse with the outer body.
+    ctx.globalAlpha = baseAlpha * 0.6 * flicker;
+    ctx.fillStyle = '#f39c12';
+    const coreScale = 0.45 + Math.sin(time * 11 + t.x * 0.07) * 0.08;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, t.radius * coreScale, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Occasional upward ember — keyed off life so old trails stop
+    // emitting before they fully fade.
+    if (particles && t.life > 0.15 && Math.random() < 0.18) {
+      const ang = Math.random() * Math.PI * 2;
+      const offR = Math.random() * t.radius * 0.7;
+      particles.push({
+        x: t.x + Math.cos(ang) * offR,
+        y: t.y + Math.sin(ang) * offR,
+        vx: (Math.random() - 0.5) * 30,
+        vy: -40 - Math.random() * 50,
+        life: 0.4 + Math.random() * 0.3,
+        maxLife: 0.7,
+        radius: 1.2 + Math.random() * 1.6,
+        color: Math.random() < 0.5 ? '#f39c12' : '#e74c3c',
+      });
+    }
+  }
 }
 
 // Charge weapon dash trail — tapered streak + speed lines + slash arc
@@ -698,7 +1319,7 @@ export function drawChargeTrail(ctx, players) {
   for (const p of players) {
     if (!p.alive) continue;
     for (const w of (p.weapons || [])) {
-      if (w.type !== 'charge' || !w.active) continue;
+      if ((w.type !== 'charge' && w.type !== 'fortress') || !w.active) continue;
       const trailDist = w.speed * w.duration;
       const progress = 1 - (w.chargeTimer / w.duration);
       const perpX = -w.chargeDy;
@@ -776,4 +1397,29 @@ export function spawnFireTrail(p, dt, particles, trailState) {
     radius: 2 + Math.random() * 2,
     color: Math.random() > 0.4 ? '#f39c12' : '#e74c3c',
   });
+}
+
+export function drawPendingPulls(ctx, pendingPulls) {
+  if (!pendingPulls || pendingPulls.length === 0) return;
+  for (const pull of pendingPulls) {
+    const progress = pull.elapsed / pull.duration;
+    const alpha = 0.5 * (1 - progress);
+    const ringR = pull.radius * (1 - progress * 0.3);
+    ctx.strokeStyle = `rgba(108, 92, 231, ${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 6]);
+    ctx.shadowColor = '#6c5ce7';
+    ctx.shadowBlur = 10;
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(pull.x, pull.y, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(162, 155, 254, ${alpha * 0.6})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(pull.x, pull.y, ringR * 0.6, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
+  }
 }
