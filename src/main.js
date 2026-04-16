@@ -3,7 +3,7 @@
 // Bundled by scripts/build.cjs → bundle.js (loaded by v1a.html)
 // ============================================================
 
-import { WORLD_W, WORLD_H, PLAYER_SPEED, PLAYER_RADIUS, PLAYER_MAX_HP, XP_MAGNET_RANGE, XP_MAGNET_SPEED } from './shared/constants.js';
+import { WORLD_W, WORLD_H, PLAYER_SPEED, PLAYER_RADIUS, PLAYER_MAX_HP, XP_MAGNET_RANGE, XP_MAGNET_SPEED, XP_START, XP_LEVEL_SCALE } from './shared/constants.js';
 import { sfx, setSfxVol as _setSfxVol, getSfxVol, getAudioCtx as getAudio } from './shared/sfx.js';
 import { installKeyboardInput } from './shared/input.js';
 import { makeBgmPlayer } from './shared/bgm.js';
@@ -254,7 +254,7 @@ function initGame() {
     sizeMulti: 1,
     armor: 0,
     xp: 0,
-    xpToLevel: 45,
+    xpToLevel: XP_START,
     level: 1,
     weapons: [createWeapon(selectedWeapon)], // start with chosen weapon
     alive: true,
@@ -272,7 +272,7 @@ function initGame() {
   // thresholds to match and queue a level-up choice for the bonus level.
   const prestigeLevels = p.level - 1;
   if (prestigeLevels > 0) {
-    for (let i = 0; i < prestigeLevels; i++) p.xpToLevel = Math.floor(p.xpToLevel * 1.22);
+    for (let i = 0; i < prestigeLevels; i++) p.xpToLevel = Math.floor(p.xpToLevel * XP_LEVEL_SCALE);
   }
 
   return {

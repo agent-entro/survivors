@@ -1,7 +1,7 @@
 // XP gem subsystem. Pure sim — no DOM, no canvas, no audio. Side-effects
 // the client cares about (sfx, particles, floating text, level-up modal)
 // are emitted as events into g.events; client decides what to render.
-import { XP_MAGNET_SPEED, XP_RADIUS } from '../constants.js';
+import { XP_MAGNET_SPEED, XP_RADIUS, XP_LEVEL_SCALE } from '../constants.js';
 import { EVT, emit } from './events.js';
 
 // Tier-per-enemy multiplier. Barnaldo flagged a brick-wall XP falloff at
@@ -59,7 +59,7 @@ export function updateGems(g, dt) {
           p.level++;
           // Flattened 1.30 → 1.22 per barnaldo's W35 falloff report.
           // Geometric 1.30 vs linear enemy xp made L36+ a brick wall.
-          p.xpToLevel = Math.floor(p.xpToLevel * 1.22);
+          p.xpToLevel = Math.floor(p.xpToLevel * XP_LEVEL_SCALE);
           emit(g, EVT.LEVEL_UP, { level: p.level, pid: p.id });
         }
         break;

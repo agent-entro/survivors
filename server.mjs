@@ -27,7 +27,7 @@ function pickMapId(rng) {
 }
 import {
   WORLD_W, WORLD_H, PLAYER_SPEED, PLAYER_RADIUS, PLAYER_MAX_HP,
-  XP_MAGNET_RANGE,
+  XP_MAGNET_RANGE, XP_START, XP_LEVEL_SCALE,
 } from './src/shared/constants.js';
 
 const PORT = Number(process.env.SURVIVORS_PORT) || 7700;
@@ -67,14 +67,23 @@ function makePlayer(pid, name, weaponType, rng, spawn, prestige) {
     attackSpeedMulti: 1,
     hpRegen: 0,
     magnetRange: XP_MAGNET_RANGE,
+    // D1-D3: these three fields are initialized here to match SP's
+    // initGame player shape. Without them, the Barrage/Amplify/Iron Skin
+    // powerup applies (p.projectileBonus++, p.sizeMulti *= 1.15,
+    // p.armor += 2) produce NaN, silently making the powerup a no-op for
+    // the rest of the run. The sim uses `|| 0`/`|| 1` fallbacks on reads,
+    // which hides the NaN but doesn't fix it.
+    projectileBonus: 0,
+    sizeMulti: 1,
+    armor: 0,
     xp: 0,
-    xpToLevel: 45,
+    xpToLevel: XP_START,  // D4: was hardcoded 45; now from constants.js
     level: 1,
     kills: 0,
     score: 0,
     weapons: [createWeapon(weaponType)],
     alive: true,
-    iframes: 2.0, // spawn protection
+    iframes: 2.0, // spawn protection (intentionally differs from SP's 0)
     facing: { x: 1, y: 0 },
     inputs: { up: false, down: false, left: false, right: false },
     // Per-player powerup catalog stacks. Starting weapon = stack 1 so
@@ -88,7 +97,8 @@ function makePlayer(pid, name, weaponType, rng, spawn, prestige) {
   };
   if (prestige) applyUnlocks(p, prestige.unlocks);
   // Headstart prestige bumps level; scale xp threshold to match.
-  for (let i = 1; i < p.level; i++) p.xpToLevel = Math.floor(p.xpToLevel * 1.22);
+  // D5: was hardcoded 1.22; now from constants.js (same scalar as gems.js).
+  for (let i = 1; i < p.level; i++) p.xpToLevel = Math.floor(p.xpToLevel * XP_LEVEL_SCALE);
   return p;
 }
 
