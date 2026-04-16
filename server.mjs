@@ -65,6 +65,14 @@ function makePlayer(pid, name, weaponType, rng, spawn, prestige) {
     attackSpeedMulti: 1,
     hpRegen: 0,
     magnetRange: XP_MAGNET_RANGE,
+    // Must mirror SP initGame's explicit zeroes. Without these, powerup
+    // apply() functions (p.projectileBonus++, p.sizeMulti *= 1.15,
+    // p.armor += 2) operate on undefined → produce NaN → the || guards
+    // in weapons_runtime silently fall back to defaults. Barrage/Amplify/
+    // Iron Skin were completely non-functional in MP before this fix.
+    projectileBonus: 0,
+    sizeMulti: 1,
+    armor: 0,
     xp: 0,
     xpToLevel: 45,
     level: 1,
