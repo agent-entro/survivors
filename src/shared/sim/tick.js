@@ -4,15 +4,16 @@
 // - auras AFTER projectiles so they see post-impact enemy positions (matches
 //   the original ordering in main.js)
 // - enemies: movement + repulsion (no longer includes player contact)
-// - collision checks AFTER enemies so positions are fully settled; hash built
-//   ONCE here and shared between bullet and player hit-tests (O(n) vs two O(n))
+// - collision checks AFTER enemies so positions are fully settled; hash
+//   returned by updateEnemies (from its internal updateRepulsion call) and
+//   shared between bullet and player hit-tests — one fewer O(N) rebuild.
 // - gems pull last since they only react to player position
 // - chain/meteor effect lifetimes drain after everything that emitted them
 import { updateWaves } from './waves.js';
 import { updateWeapons, updateAuras, updateChainEffects, updateMeteorEffects, updateChargeTrails, updatePendingPulls } from './weapons_runtime.js';
 import { updateProjectiles } from './projectiles.js';
 import { updateEnemies } from './enemies.js';
-import { buildSpatialHash, checkBulletEnemyCollisions, checkEnemyPlayerCollisions } from './collision.js';
+import { checkBulletEnemyCollisions, checkEnemyPlayerCollisions } from './collision.js';
 import { updateGems } from './gems.js';
 import { updateHearts } from './hearts.js';
 import { updateConsumables } from './consumables.js';
@@ -27,9 +28,9 @@ export function tickSim(g, dt) {
   updateWeapons(g, dt);
   updateProjectiles(g, dt);      // movement + obstacle blocking only
   updateAuras(g, dt);
-  updateEnemies(g, dt);          // movement + repulsion; contact moved below
-  // Build the enemy spatial hash once, share it for both collision passes.
-  const enemyHash = buildSpatialHash(g.enemies);
+  // updateEnemies returns the post-repulsion spatial hash it already built
+  // internally — reuse it for both collision passes, no third rebuild.
+  const enemyHash = updateEnemies(g, dt);
   checkBulletEnemyCollisions(g, enemyHash);
   checkEnemyPlayerCollisions(g, enemyHash);
   updatePendingPulls(g, dt);

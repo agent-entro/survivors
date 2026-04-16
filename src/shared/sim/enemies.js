@@ -5,7 +5,7 @@
 import { ENEMY_TYPES, enemyType, scaleEnemy } from '../enemyTypes.js';
 import { WORLD_W, WORLD_H } from '../constants.js';
 import { EVT, emit } from './events.js';
-import { pushOutOfObstacles, obstacleAvoidance } from './collision.js';
+import { buildSpatialHash, HASH_CELL, HASH_KEY_STRIDE, pushOutOfObstacles, obstacleAvoidance } from './collision.js';
 import { enemyShootingAi } from './enemyProjectiles.js';
 import { damageEnemy } from './damage.js';
 // Reusable zero vector for the no-obstacles path — saves an
@@ -36,27 +36,6 @@ export function applyStatus(g, enemy, effect) {
   }
   enemy.statusEffects.push({ ...effect, remaining: dur, tickAccum: 0 });
   emit(g, EVT.STATUS_APPLIED, { statusType: effect.type, x: enemy.x, y: enemy.y });
-}
-
-// Cell size for the spatial hash. Sized to cover the largest flock
-// perception radius (150 for fast/tank) within a 1-cell neighbor
-// window — so each enemy's flock query scans at most 9 cells. Repulsion
-// (max sum-of-radii ~48) easily fits in the same hash.
-const HASH_CELL = 150;
-const HASH_KEY_STRIDE = 100000;
-
-function buildSpatialHash(enemies) {
-  const cells = new Map();
-  for (let i = 0; i < enemies.length; i++) {
-    const e = enemies[i];
-    const cx = Math.floor(e.x / HASH_CELL);
-    const cy = Math.floor(e.y / HASH_CELL);
-    const k = cx * HASH_KEY_STRIDE + cy;
-    let bucket = cells.get(k);
-    if (!bucket) { bucket = []; cells.set(k, bucket); }
-    bucket.push(i);
-  }
-  return cells;
 }
 
 // Pick a random alive player as the spawn anchor. Falls back to the
@@ -405,10 +384,8 @@ function computeFlockSteering(g, hash, ei) {
     for (let ky = -1; ky <= 1; ky++) {
       const bucket = hash.get((cx + kx) * HASH_KEY_STRIDE + (cy + ky));
       if (!bucket) continue;
-      for (let bi = 0; bi < bucket.length; bi++) {
-        const j = bucket[bi];
-        if (j === ei) continue;
-        const o = g.enemies[j];
+      for (const o of bucket) {
+        if (o === e) continue;
         if (o.name !== e.name || o.dying !== undefined) continue;
         const dx = e.x - o.x, dy = e.y - o.y;
         const d2 = dx * dx + dy * dy;
@@ -562,9 +539,14 @@ function updateEnemyTick(g, dt, hash) {
 // Pass 2: hard overlap correction. Per-type separation in the flock pass
 // already keeps enemies spaced at preferred distances; this pass only
 // fires when sprites actually overlap (sum-of-radii) to prevent visual
-// stacking. Builds its own hash post-movement.
+// stacking. Builds post-movement hash and returns it so tick.js can
+// reuse it for bullet + player collision passes (saves one rebuild).
 function updateRepulsion(g) {
   const hash = buildSpatialHash(g.enemies);
+  // Stamp each enemy with its current array index so we can do O(1)
+  // pair dedup without a Set allocation. Written before the inner loop,
+  // overwritten each tick — safe since no enemies are removed here.
+  for (let i = 0; i < g.enemies.length; i++) g.enemies[i]._ri = i;
   for (let i = 0; i < g.enemies.length; i++) {
     const e = g.enemies[i];
     const cx = Math.floor(e.x / HASH_CELL);
@@ -573,10 +555,8 @@ function updateRepulsion(g) {
       for (let dy = -1; dy <= 1; dy++) {
         const bucket = hash.get((cx + dx) * HASH_KEY_STRIDE + (cy + dy));
         if (!bucket) continue;
-        for (let bi = 0; bi < bucket.length; bi++) {
-          const j = bucket[bi];
-          if (j <= i) continue; // each pair handled once
-          const e2 = g.enemies[j];
+        for (const e2 of bucket) {
+          if (e2._ri <= i) continue; // skip self (_ri===i) and already-processed pairs
           const rx = e.x - e2.x;
           const ry = e.y - e2.y;
           const rd = Math.sqrt(rx * rx + ry * ry);
@@ -594,6 +574,7 @@ function updateRepulsion(g) {
       }
     }
   }
+  return hash;
 }
 
 export function updateEnemies(g, dt) {
@@ -608,7 +589,7 @@ export function updateEnemies(g, dt) {
   }
   const hash = buildSpatialHash(g.enemies);
   updateEnemyTick(g, dt, hash);
-  updateRepulsion(g);
+  const repulsionHash = updateRepulsion(g);
   // Final push-out pass: enemy-vs-enemy repulsion can shove neighbors
   // sideways into walls, so we re-correct after. Without this an enemy
   // packed against a wall by its flockmates ends each tick stuck
@@ -618,6 +599,7 @@ export function updateEnemies(g, dt) {
       if (e.dying === undefined) pushOutOfObstacles(e, g.obstacles);
     }
   }
-  // Contact damage is handled by checkEnemyPlayerCollisions in collision.js,
-  // called from tick.js after this function with a shared spatial hash.
+  // Return the post-repulsion hash so tick.js can share it with the
+  // bullet and player collision passes — one fewer O(N) rebuild per tick.
+  return repulsionHash;
 }
