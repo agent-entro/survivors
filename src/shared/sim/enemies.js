@@ -5,32 +5,41 @@
 import { ENEMY_TYPES, enemyType, scaleEnemy } from '../enemyTypes.js';
 import { WORLD_W, WORLD_H } from '../constants.js';
 import { EVT, emit } from './events.js';
-import { pushOutOfObstacles, obstacleAvoidance } from './collision.js';
-
+import { buildSpatialHash, HASH_CELL, HASH_KEY_STRIDE, pushOutOfObstacles, obstacleAvoidance } from './collision.js';
+import { enemyShootingAi } from './enemyProjectiles.js';
+import { damageEnemy } from './damage.js';
 // Reusable zero vector for the no-obstacles path — saves an
 // allocation per enemy per tick on maps without obstacles.
 const ZERO_VEC = { x: 0, y: 0 };
 
-// Cell size for the spatial hash. Sized to cover the largest flock
-// perception radius (150 for fast/tank) within a 1-cell neighbor
-// window — so each enemy's flock query scans at most 9 cells. Repulsion
-// (max sum-of-radii ~48) easily fits in the same hash.
-const HASH_CELL = 150;
-const HASH_KEY_STRIDE = 100000;
-
-function buildSpatialHash(enemies) {
-  const cells = new Map();
-  for (let i = 0; i < enemies.length; i++) {
-    const e = enemies[i];
-    const cx = Math.floor(e.x / HASH_CELL);
-    const cy = Math.floor(e.y / HASH_CELL);
-    const k = cx * HASH_KEY_STRIDE + cy;
-    let bucket = cells.get(k);
-    if (!bucket) { bucket = []; cells.set(k, bucket); }
-    bucket.push(i);
+// Apply a status effect to an enemy. Same-type effects refresh duration
+// (no stacking) — caller can safely re-apply on every hit.
+//
+// `enemy.statusResist` (0..1) shortens incoming durations: boss/elite
+// get 0.5 (half duration), spawner 0.3, trash 0 (full). Replaces the
+// hard "boss immune" behavior — bosses can be slowed/burned briefly,
+// just not locked down. Phase 3 dodging stays a real skill check
+// (boss freeze ≈ 0.4s with the 0.5 resist) without trivializing it.
+//
+// effect shape: { type, remaining, magnitude, tickRate? }
+export function applyStatus(g, enemy, effect) {
+  if (enemy.dying !== undefined) return;
+  const resist = enemy.statusResist || 0;
+  const dur = effect.remaining * (1 - resist);
+  if (dur <= 0) return; // resist 1.0 = full immunity
+  enemy.statusEffects ??= [];
+  const existing = enemy.statusEffects.find(s => s.type === effect.type);
+  if (existing) {
+    // Refresh — don't reset tickAccum so in-progress burn ticks aren't lost.
+    existing.remaining = Math.max(existing.remaining, dur);
+    return;
   }
-  return cells;
+  enemy.statusEffects.push({ ...effect, remaining: dur, tickAccum: 0 });
+  emit(g, EVT.STATUS_APPLIED, { statusType: effect.type, x: enemy.x, y: enemy.y });
 }
+
+// HASH_CELL, HASH_KEY_STRIDE, and buildSpatialHash imported from collision.js
+// — single implementation shared by flock steering, repulsion, and collision.
 
 // Pick a random alive player as the spawn anchor. Falls back to the
 // world centre if everyone's dead (shouldn't happen — caller skips ticks
@@ -56,6 +65,9 @@ export function spawnEnemy(g) {
   // start its life clipped through a wall.
   if (g.obstacles && g.obstacles.length > 0) pushOutOfObstacles(e, g.obstacles);
   g.enemies.push(e);
+  // Boss arrival is a moment — emit so clients can play the
+  // ominous sfx + telegraph particles + screen shake.
+  if (e.name === 'boss') emit(g, EVT.BOSS_SPAWN, { x: e.x, y: e.y });
 }
 
 // Returns the alive player with the smallest distance to (ex, ey), plus
@@ -76,6 +88,191 @@ function nearestAlivePlayer(g, ex, ey) {
 // Boss steps + telegraph use g.rng for cadence so server replay stays
 // in sync. Ghost orbit and movement are deterministic given current pos.
 function updateBossAi(g, e, dt, edx, edy, dist) {
+  // --- Phase transitions ---
+  // baseSpeed captured once so phase multipliers stack cleanly off
+  // the wave-scaled value set by scaleEnemy, not the base type speed.
+  if (!e.phase) {
+    e.phase = 1;
+    e.baseSpeed = e.speed;
+  }
+
+  const hpPct = e.hp / e.maxHp;
+  if (hpPct <= 0.20 && e.phase === 4) {
+    // Phase 5 — Final Form. Requires phase 4 (enrage) to have already
+    // triggered so players always see the healer mechanic. Three new
+    // pressures: rapid teleport bursts (damage zone left at each old
+    // position), minion rain (2 elites + 3 brutes), arena-wide nova
+    // with a telegraphed safe corner. HP resurrection intercept in
+    // damageEnemy lets the boss survive the first kill attempt.
+    e.phase = 5;
+    e.speed = e.baseSpeed * 1.80;
+    if (e.shootCooldown) e.shootCooldown = 0.9;
+    e.teleportTimer = 1.5; // grace window before first teleport
+    e.novaTimer = 10;      // first nova after 10s
+    // Minion rain — 2 elites + 3 brutes scattered around the boss.
+    const eliteBase = ENEMY_TYPES.find(t => t.name === 'elite');
+    const bruteBase = ENEMY_TYPES.find(t => t.name === 'brute');
+    for (let s = 0; s < 2 && eliteBase; s++) {
+      const sa = g.rng.random() * Math.PI * 2;
+      const sr = 80 + g.rng.random() * 60;
+      const minion = scaleEnemy(eliteBase, g.wave, g.rng);
+      minion.x = e.x + Math.cos(sa) * sr;
+      minion.y = e.y + Math.sin(sa) * sr;
+      g.enemies.push(minion);
+    }
+    for (let s = 0; s < 3 && bruteBase; s++) {
+      const sa = g.rng.random() * Math.PI * 2;
+      const sr = 80 + g.rng.random() * 80;
+      const minion = scaleEnemy(bruteBase, g.wave, g.rng);
+      minion.x = e.x + Math.cos(sa) * sr;
+      minion.y = e.y + Math.sin(sa) * sr;
+      g.enemies.push(minion);
+    }
+    emit(g, EVT.BOSS_PHASE, { phase: 5, x: e.x, y: e.y });
+  } else if (hpPct <= 0.25 && e.phase < 4) {
+    // Phase 4 — enrage. Speed and movement unchanged on purpose
+    // (per VoX scope); only the attack pattern tightens. Faster
+    // shoot cadence + drop the charge telegraph so dodges become
+    // pure reaction. One-time summon of 2 healers at the boss
+    // position so killing those becomes the new prerequisite to
+    // safely chip the last quarter HP.
+    e.phase = 4;
+    e.enraged = true;
+    if (e.shootCooldown) e.shootCooldown = 1.2;
+    const baseHealer = ENEMY_TYPES.find(t => t.name === 'healer');
+    if (baseHealer) {
+      for (let s = 0; s < 2; s++) {
+        const sa = g.rng.random() * Math.PI * 2;
+        const sr = 50 + g.rng.random() * 30;
+        const minion = scaleEnemy(baseHealer, g.wave, g.rng);
+        minion.x = e.x + Math.cos(sa) * sr;
+        minion.y = e.y + Math.sin(sa) * sr;
+        g.enemies.push(minion);
+      }
+    }
+    emit(g, EVT.BOSS_PHASE, { phase: 4, x: e.x, y: e.y });
+  } else if (hpPct <= 1 / 3 && e.phase < 3) {
+    e.phase = 3;
+    // +30% from phase 2, then another +20% = ×1.56 total vs baseSpeed
+    e.speed = e.baseSpeed * 1.56;
+    e.homing = true;
+    e.summonTimer = 0; // fire first pulse immediately
+    // Drop shoot cooldown in case boss enters phase 3 directly
+    if (e.shootCooldown) e.shootCooldown = 2.0;
+    emit(g, EVT.BOSS_PHASE, { phase: 3, x: e.x, y: e.y });
+  } else if (hpPct <= 2 / 3 && e.phase < 2) {
+    e.phase = 2;
+    e.speed = e.baseSpeed * 1.30;
+    if (e.shootCooldown) e.shootCooldown = 2.0;
+    emit(g, EVT.BOSS_PHASE, { phase: 2, x: e.x, y: e.y });
+  }
+
+  // Phase 3 summon pulse — 3 swarm minions every 8 s, runs during
+  // both stalk and charge so the pressure never lets up.
+  if (e.phase === 3) {
+    e.summonTimer -= dt;
+    if (e.summonTimer <= 0) {
+      e.summonTimer = 8;
+      const base = ENEMY_TYPES.find(t => t.name === 'swarm');
+      for (let s = 0; s < 3; s++) {
+        const sa = g.rng.random() * Math.PI * 2;
+        const sr = 20 + g.rng.random() * 25;
+        const minion = scaleEnemy(base, g.wave, g.rng);
+        minion.x = e.x + Math.cos(sa) * sr;
+        minion.y = e.y + Math.sin(sa) * sr;
+        g.enemies.push(minion);
+      }
+    }
+  }
+
+  // Phase 5 — teleport bursts + arena nova.
+  if (e.phase === 5) {
+    // Rapid teleport: boss vanishes, leaves a damage zone, reappears
+    // near a player. Damage zone uses the existing meteor warn→explode
+    // path with targetsPlayer so the renderer and collision are free.
+    e.teleportTimer -= dt;
+    if (e.teleportTimer <= 0) {
+      e.teleportTimer = 1.0 + g.rng.random() * 1.0;
+      const oldX = e.x, oldY = e.y;
+      const tgt = nearestAlivePlayer(g, e.x, e.y);
+      if (tgt) {
+        const ta = g.rng.random() * Math.PI * 2;
+        const tr = 120 + g.rng.random() * 100;
+        const W = g.arena ? g.arena.w : WORLD_W;
+        const H = g.arena ? g.arena.h : WORLD_H;
+        e.x = Math.max(e.radius, Math.min(W - e.radius, tgt.p.x + Math.cos(ta) * tr));
+        e.y = Math.max(e.radius, Math.min(H - e.radius, tgt.p.y + Math.sin(ta) * tr));
+      }
+      g.meteorEffects.push({
+        x: oldX, y: oldY,
+        radius: 80,
+        damage: Math.round(e.damage * 0.6),
+        life: 0.5, phase: 'warn',
+        color: '#6c0000',
+        targetsPlayer: true, sourceName: 'boss',
+      });
+      emit(g, EVT.METEOR_WARN, { x: oldX, y: oldY, radius: 80 });
+      emit(g, EVT.BOSS_TELEPORT, { fromX: oldX, fromY: oldY, toX: e.x, toY: e.y });
+    }
+
+    // Arena-wide nova: 2.5s warn window, then everyone outside the
+    // safe corner takes heavy damage. Safe zone is the arena corner
+    // farthest from the boss at warn time.
+    e.novaTimer -= dt;
+    if (e.novaTimer <= 0) {
+      e.novaTimer = 12 + g.rng.random() * 4;
+      const W = g.arena ? g.arena.w : WORLD_W;
+      const H = g.arena ? g.arena.h : WORLD_H;
+      const corners = [
+        { x: 300, y: 300 }, { x: W - 300, y: 300 },
+        { x: 300, y: H - 300 }, { x: W - 300, y: H - 300 },
+      ];
+      let safePt = corners[0], bestD2 = 0;
+      for (const c of corners) {
+        const cdx = c.x - e.x, cdy = c.y - e.y;
+        if (cdx * cdx + cdy * cdy > bestD2) { bestD2 = cdx * cdx + cdy * cdy; safePt = c; }
+      }
+      e.novaSafeZone = { x: safePt.x, y: safePt.y, radius: 280 };
+      e.novaWarnTimer = 2.5;
+      emit(g, EVT.BOSS_AOE_WARN, {
+        x: e.x, y: e.y,
+        safeX: safePt.x, safeY: safePt.y, safeRadius: 280,
+        warnDuration: 2.5,
+      });
+    }
+
+    // Tick down warn, then apply nova damage.
+    if (e.novaWarnTimer > 0) {
+      e.novaWarnTimer -= dt;
+      if (e.novaWarnTimer <= 0) {
+        e.novaWarnTimer = 0;
+        for (const p of g.players) {
+          if (!p.alive || p.iframes > 0) continue;
+          if (e.novaSafeZone) {
+            const sx = e.novaSafeZone.x - p.x, sy = e.novaSafeZone.y - p.y;
+            if (sx * sx + sy * sy < e.novaSafeZone.radius ** 2) continue;
+          }
+          const dmg = Math.max(1, Math.round(e.damage * 2.5) - (p.armor || 0));
+          p.hp -= dmg;
+          p.iframes = 0.5;
+          emit(g, EVT.PLAYER_HIT, { x: p.x, y: p.y, dmg, by: 'boss', pid: p.id });
+          if (p.hp <= 0) {
+            p.hp = 0;
+            p.alive = false;
+            emit(g, EVT.PLAYER_DEATH, { x: p.x, y: p.y, by: 'boss', pid: p.id });
+          }
+        }
+        emit(g, EVT.BOSS_AOE_EXPLODE, {
+          x: e.x, y: e.y,
+          safeX: e.novaSafeZone?.x, safeY: e.novaSafeZone?.y,
+          safeRadius: e.novaSafeZone?.radius,
+        });
+        e.novaSafeZone = undefined;
+      }
+    }
+  }
+
+  // --- Charge movement ---
   if (e.charging > 0) {
     e.x += e.chargeDx * e.speed * 3 * dt;
     e.y += e.chargeDy * e.speed * 3 * dt;
@@ -95,12 +292,18 @@ function updateBossAi(g, e, dt, edx, edy, dist) {
     e.chargeDx = edx / dist;
     e.chargeDy = edy / dist;
     e.charging = 0.8;
-    e.chargeTimer = 4 + g.rng.random() * 3;
-    emit(g, EVT.BOSS_TELEGRAPH, { x: e.x, y: e.y });
+    // Enrage compresses the gap between charges and skips the windup
+    // telegraph — players can't pre-dodge, only react to the dash itself.
+    if (e.enraged) {
+      e.chargeTimer = 1.5 + g.rng.random() * 1.5;
+    } else {
+      e.chargeTimer = 4 + g.rng.random() * 3;
+      emit(g, EVT.BOSS_TELEGRAPH, { x: e.x, y: e.y });
+    }
   }
 }
 
-function updateGhostMovement(e, dt, edx, edy, dist) {
+function updateGhostMovement(e, dt, edx, edy, dist, speedMod = 1) {
   const nx = edx / dist;
   const ny = edy / dist;
   const sign = e.orbitSign || 1;
@@ -109,8 +312,8 @@ function updateGhostMovement(e, dt, edx, edy, dist) {
   // closing at range, committed up close, drive-by prevented at melee
   const inward = dist > 100 ? 0.8 : 1.0;
   const orbit = dist > 100 ? 0.6 : dist > 30 ? 0.3 : 0.1;
-  e.x += (nx * inward + perpX * orbit) * e.speed * dt;
-  e.y += (ny * inward + perpY * orbit) * e.speed * dt;
+  e.x += (nx * inward + perpX * orbit) * e.speed * speedMod * dt;
+  e.y += (ny * inward + perpY * orbit) * e.speed * speedMod * dt;
 }
 
 function updateSpawnerAi(g, e, dt) {
@@ -118,10 +321,19 @@ function updateSpawnerAi(g, e, dt) {
   if (e.spawnTimer > 0) return;
   e.spawnTimer = 3 + g.rng.random() * 2;
   const count = 3 + Math.floor(g.rng.random() * 3); // 3-5 swarmlings
+  // Wave 12+ a third of each brood comes out as poisoners instead of
+  // swarm. Same per-minion roll so a single brood can be mixed; the
+  // visual still reads as a swarm because most of the brood are still
+  // swarm sprites, but kiting becomes mandatory because contact with
+  // any of the teal ones stacks a 4s burn.
+  const poisonerChance = g.wave >= 12 ? 0.33 : 0;
+  const swarmBase = ENEMY_TYPES.find(t => t.name === 'swarm');
+  const poisonBase = ENEMY_TYPES.find(t => t.name === 'poisoner');
   for (let s = 0; s < count; s++) {
     const sa = g.rng.random() * Math.PI * 2;
     const sr = 20 + g.rng.random() * 20;
-    const base = ENEMY_TYPES.find(t => t.name === 'swarm');
+    const usePoisoner = poisonerChance > 0 && g.rng.random() < poisonerChance;
+    const base = usePoisoner && poisonBase ? poisonBase : swarmBase;
     const minion = scaleEnemy(base, g.wave, g.rng);
     minion.x = e.x + Math.cos(sa) * sr;
     minion.y = e.y + Math.sin(sa) * sr;
@@ -130,12 +342,38 @@ function updateSpawnerAi(g, e, dt) {
   emit(g, EVT.HIVE_BURST, { x: e.x, y: e.y });
 }
 
+// Healer pulse — every healInterval, restore healAmount HP to every
+// enemy within healRadius (excluding self and dying enemies). Caps at
+// each enemy's maxHp so it can't overheal. Reuses HIVE_BURST as the
+// visual cue since clients already render it as a soft particle pop;
+// the green color of the healer makes the burst read as healing
+// without needing a new event type.
+function updateHealerAi(g, e, dt) {
+  e.healTimer -= dt;
+  if (e.healTimer > 0) return;
+  e.healTimer = e.healInterval;
+  const r2 = e.healRadius * e.healRadius;
+  let healed = 0;
+  for (const other of g.enemies) {
+    if (other === e || other.dying !== undefined) continue;
+    const dx = other.x - e.x, dy = other.y - e.y;
+    if (dx * dx + dy * dy > r2) continue;
+    if (other.hp >= other.maxHp) continue;
+    other.hp = Math.min(other.maxHp, other.hp + e.healAmount);
+    healed++;
+  }
+  // `source: 'healer'` lets the client render a visible heal ring
+  // instead of the generic spawner pop, with radius so the ring sizes
+  // to the actual heal reach. Players can read priority at a glance.
+  if (healed > 0) emit(g, EVT.HIVE_BURST, { x: e.x, y: e.y, source: 'healer', radius: e.healRadius });
+}
+
 // Boids steering: separation + alignment + cohesion vs same-type
 // neighbors inside this enemy's flock perception radius. Reads from the
 // pre-built spatial hash so we touch only ~9 cells per enemy. Returns
 // the unweighted forces — caller blends with chase + chaseWeight.
-function computeFlockSteering(g, hash, ei) {
-  const e = g.enemies[ei];
+// Receives entity reference (not index) since hash buckets now store entities.
+function computeFlockSteering(g, hash, e) {
   const fc = e.flock;
   const cx = Math.floor(e.x / HASH_CELL);
   const cy = Math.floor(e.y / HASH_CELL);
@@ -149,10 +387,8 @@ function computeFlockSteering(g, hash, ei) {
     for (let ky = -1; ky <= 1; ky++) {
       const bucket = hash.get((cx + kx) * HASH_KEY_STRIDE + (cy + ky));
       if (!bucket) continue;
-      for (let bi = 0; bi < bucket.length; bi++) {
-        const j = bucket[bi];
-        if (j === ei) continue;
-        const o = g.enemies[j];
+      for (const o of bucket) {
+        if (o === e) continue;
         if (o.name !== e.name || o.dying !== undefined) continue;
         const dx = e.x - o.x, dy = e.y - o.y;
         const d2 = dx * dx + dy * dy;
@@ -191,19 +427,57 @@ function updateEnemyTick(g, dt, hash) {
     const e = g.enemies[i];
     if (e.dying !== undefined) continue; // animating but not interacting
 
+    // Status effects: drain durations, apply burn DoT, compute speed
+    // multiplier. Resist (boss 0.5 / elite 0.5 / spawner 0.3) shortens
+    // incoming durations at apply-time, not here. Freeze reuses the
+    // stunTimer gate so spawner-birth and shooting are also suppressed
+    // (matches thunder_god overcharge behavior).
+    let speedMod = 1;
+    if (e.statusEffects?.length) {
+      e.statusEffects = e.statusEffects.filter(s => {
+        s.remaining -= dt;
+        if (s.type === 'burn') {
+          s.tickAccum = (s.tickAccum || 0) + dt;
+          // Drain accumulated time in full tick increments so fast dt
+          // values don't skip a tick.
+          while (s.tickAccum >= s.tickRate && !e.dying) {
+            damageEnemy(g, e, s.magnitude, null);
+            s.tickAccum -= s.tickRate;
+          }
+          // Low-rate ember emit on the sim path (~4% chance/tick per burning
+          // enemy) so simEventHandler can push particles respecting the cap.
+          // Uses Math.random() — cosmetic, not replicated to server.
+          if (Math.random() < 0.04) emit(g, EVT.BURN_TICK, { x: e.x, y: e.y, radius: e.radius });
+        } else if (s.type === 'slow') {
+          speedMod = Math.min(speedMod, s.magnitude);
+        } else if (s.type === 'freeze') {
+          speedMod = 0;
+        }
+        if (s.remaining <= 0) {
+          emit(g, EVT.STATUS_EXPIRED, { statusType: s.type, x: e.x, y: e.y });
+          return false;
+        }
+        return true;
+      });
+      // Freeze: bump stunTimer by one frame so the existing gate
+      // blocks movement/spawner/shooting this tick without touching
+      // the stun decrement logic that runs inside the guard.
+      if (speedMod === 0) e.stunTimer = Math.max(e.stunTimer || 0, dt + 0.001);
+    }
+
     // Stunned enemies freeze in place but still take damage. Thunder god
-    // overcharge is the current source; any future CC rides the same hook.
+    // overcharge is the current source; freeze status extends this gate.
     if (e.stunTimer > 0) {
       e.stunTimer -= dt;
     } else {
       const target = nearestAlivePlayer(g, e.x, e.y);
       if (target && target.dist > 1) {
-        if (e.name === 'ghost')      updateGhostMovement(e, dt, target.dx, target.dy, target.dist);
+        if (e.name === 'ghost')      updateGhostMovement(e, dt, target.dx, target.dy, target.dist, speedMod);
         else if (e.name === 'boss')  updateBossAi(g, e, dt, target.dx, target.dy, target.dist);
         else if (!e.flock) {
           // Fallback for any type without flock config — pure chase.
-          e.x += (target.dx / target.dist) * e.speed * dt;
-          e.y += (target.dy / target.dist) * e.speed * dt;
+          e.x += (target.dx / target.dist) * e.speed * speedMod * dt;
+          e.y += (target.dy / target.dist) * e.speed * speedMod * dt;
         } else {
           // Boids blend: chase + separation + alignment + cohesion +
           // obstacle avoidance. Avoidance has a high implicit weight
@@ -212,7 +486,7 @@ function updateEnemyTick(g, dt, hash) {
           const fc = e.flock;
           const chaseX = target.dx / target.dist;
           const chaseY = target.dy / target.dist;
-          const f = computeFlockSteering(g, hash, i);
+          const f = computeFlockSteering(g, hash, e);
           // Lookahead distance scales with speed so fast enemies see
           // further ahead and have room to steer. At 60u/s (blob) this
           // gives ~60u lookahead; at 130u/s (fast) ~110u — enough to
@@ -232,13 +506,13 @@ function updateEnemyTick(g, dt, hash) {
                  + avoid.y * 5.0;
           const m = Math.hypot(vx, vy);
           if (m > 0.001) {
-            e.vx = (vx / m) * e.speed;
-            e.vy = (vy / m) * e.speed;
+            e.vx = (vx / m) * e.speed * speedMod;
+            e.vy = (vy / m) * e.speed * speedMod;
           } else {
             // Forces canceled exactly — fall back to chase so the enemy
             // doesn't freeze in place.
-            e.vx = chaseX * e.speed;
-            e.vy = chaseY * e.speed;
+            e.vx = chaseX * e.speed * speedMod;
+            e.vy = chaseY * e.speed * speedMod;
           }
           e.x += e.vx * dt;
           e.y += e.vy * dt;
@@ -253,34 +527,28 @@ function updateEnemyTick(g, dt, hash) {
     // Spawner births minions on a timer — gated by stun so a stunned
     // hive doesn't keep pumping out swarmlings during the freeze.
     if (e.name === 'spawner' && (!e.stunTimer || e.stunTimer <= 0)) updateSpawnerAi(g, e, dt);
+    // Healer pulses HP back into nearby enemies — same stun gate so
+    // freeze/stun stalls support behavior, not just damage.
+    if (e.name === 'healer' && (!e.stunTimer || e.stunTimer <= 0)) updateHealerAi(g, e, dt);
+
+    // Ranged attacks — elites fire aimed shots, bosses fire spreads.
+    // Uses its own nearest-player lookup because the movement target
+    // is scoped inside the stun guard above.
+    if (e.shootCooldown && (!e.stunTimer || e.stunTimer <= 0)) {
+      const shootTarget = nearestAlivePlayer(g, e.x, e.y);
+      enemyShootingAi(g, e, dt, shootTarget);
+    }
 
     if (e.hitFlash > 0) e.hitFlash -= dt * 5;
 
-    // Contact damage — hit every overlapping alive player (not just nearest).
-    for (const p of g.players) {
-      if (!p.alive || p.iframes > 0) continue;
-      const dx = p.x - e.x, dy = p.y - e.y;
-      if (dx * dx + dy * dy < (p.radius + e.radius) ** 2) {
-        const dmg = Math.max(1, e.damage - (p.armor || 0));
-        p.hp -= dmg;
-        p.iframes = 0.5;
-        emit(g, EVT.PLAYER_HIT, { x: p.x, y: p.y, dmg, by: e.name, pid: p.id });
-        if (p.hp <= 0) {
-          p.hp = 0;
-          p.alive = false;
-          emit(g, EVT.PLAYER_DEATH, { by: e.name, pid: p.id });
-        }
-      }
-    }
   }
 }
-
-// Pass 2: hard overlap correction. Per-type separation in the flock pass
-// already keeps enemies spaced at preferred distances; this pass only
-// fires when sprites actually overlap (sum-of-radii) to prevent visual
-// stacking. Builds its own hash post-movement.
-function updateRepulsion(g) {
-  const hash = buildSpatialHash(g.enemies);
+// Pass 2: hard overlap correction. Accepts the hash already built in
+// updateEnemies (entity-based, same as collision.js). Tag each enemy with
+// a temp _repIdx so we process each pair (e, e2) only once without an
+// O(N) indexOf — e2._repIdx <= i skips self and already-handled pairs.
+function updateRepulsion(g, hash) {
+  for (let i = 0; i < g.enemies.length; i++) g.enemies[i]._repIdx = i;
   for (let i = 0; i < g.enemies.length; i++) {
     const e = g.enemies[i];
     const cx = Math.floor(e.x / HASH_CELL);
@@ -289,10 +557,8 @@ function updateRepulsion(g) {
       for (let dy = -1; dy <= 1; dy++) {
         const bucket = hash.get((cx + dx) * HASH_KEY_STRIDE + (cy + dy));
         if (!bucket) continue;
-        for (let bi = 0; bi < bucket.length; bi++) {
-          const j = bucket[bi];
-          if (j <= i) continue; // each pair handled once
-          const e2 = g.enemies[j];
+        for (const e2 of bucket) {
+          if (e2._repIdx <= i) continue; // each pair handled once
           const rx = e.x - e2.x;
           const ry = e.y - e2.y;
           const rd = Math.sqrt(rx * rx + ry * ry);
@@ -312,19 +578,23 @@ function updateRepulsion(g) {
   }
 }
 
+// Returns the spatial hash built here so tick.js can pass it directly to
+// checkBulletEnemyCollisions / checkEnemyPlayerCollisions — eliminating the
+// third redundant buildSpatialHash call that was at tick.js:32.
 export function updateEnemies(g, dt) {
   // Pre-pass: progress death animations + remove finished ones BEFORE
   // building the hash so the flock pass sees stable indices (no
-  // mid-tick splices invalidating the bucket index lists).
+  // mid-tick splices invalidating the bucket entity lists).
   for (let i = g.enemies.length - 1; i >= 0; i--) {
     const e = g.enemies[i];
     if (e.dying === undefined) continue;
     e.dying -= dt;
     if (e.dying <= 0) g.enemies.splice(i, 1);
   }
+  // Build once, share across flock steering, repulsion, and collision checks.
   const hash = buildSpatialHash(g.enemies);
   updateEnemyTick(g, dt, hash);
-  updateRepulsion(g);
+  updateRepulsion(g, hash);
   // Final push-out pass: enemy-vs-enemy repulsion can shove neighbors
   // sideways into walls, so we re-correct after. Without this an enemy
   // packed against a wall by its flockmates ends each tick stuck
@@ -334,4 +604,7 @@ export function updateEnemies(g, dt) {
       if (e.dying === undefined) pushOutOfObstacles(e, g.obstacles);
     }
   }
+  // Contact damage is handled by checkEnemyPlayerCollisions in collision.js,
+  // called from tick.js after this function with the hash returned here.
+  return hash;
 }

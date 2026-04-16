@@ -4,6 +4,7 @@
 // METEOR_EXPLODE, SHIELD_HUM, CHARGE_BURST events.
 import { EVT, emit } from './events.js';
 import { damageEnemy } from './damage.js';
+import { applyStatus } from './enemies.js';
 
 // Random-N enemies inside a circular range, drawn via Fisher-Yates so
 // the choice tracks g.rng deterministically. Used by lightning_field +
@@ -33,13 +34,14 @@ function fireWeapon(g, w, p) {
   else if (w.type === 'thunder_god')  fireThunderGod(g, w, p);
   else if (w.type === 'meteor_orbit') fireMeteor(g, w, p);
   else if (w.type === 'fortress')     fireCharge(g, w, p);
+  else if (w.type === 'void_anchor')  fireVoidAnchor(g, w, p);
 }
 
 function fireSpit(g, w, p) {
-  let nearest = null, nearestDist = w.range;
+  let nearest = null, nearestD2 = w.range * w.range;
   for (const e of g.enemies) {
-    const d = Math.hypot(e.x - p.x, e.y - p.y);
-    if (d < nearestDist) { nearest = e; nearestDist = d; }
+    const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
+    if (d2 < nearestD2) { nearest = e; nearestD2 = d2; }
   }
   if (!nearest) return;
   emit(g, EVT.WEAPON_FIRE, { weapon: 'spit', x: p.x, y: p.y, pid: p.id });
@@ -70,33 +72,59 @@ function fireCharge(g, w, p) {
   w.chargeTimer = w.duration;
   w.chargeDx = f.x / d;
   w.chargeDy = f.y / d;
+  const startX = p.x, startY = p.y;
   p.x += w.chargeDx * w.speed * w.duration;
   p.y += w.chargeDy * w.speed * w.duration;
   p.x = Math.max(p.radius, Math.min(g.arena.w - p.radius, p.x));
   p.y = Math.max(p.radius, Math.min(g.arena.h - p.radius, p.y));
   emit(g, EVT.CHARGE_BURST, { x: p.x, y: p.y, color: w.color, pid: p.id });
+  // Fire wake — drop damage zones along the dash path. Enemies
+  // that walk through the trail take half charge damage per tick.
+  // Rewards aggressive pathing through enemy packs.
+  if (!g.chargeTrails) g.chargeTrails = [];
+  const trailDist = Math.hypot(p.x - startX, p.y - startY);
+  const zones = Math.max(3, Math.floor(trailDist / 30));
+  const effectiveWidth = w.width * (p.sizeMulti || 1);
+  for (let i = 0; i <= zones; i++) {
+    const t = i / zones;
+    g.chargeTrails.push({
+      x: startX + (p.x - startX) * t,
+      y: startY + (p.y - startY) * t,
+      radius: effectiveWidth * 0.6,
+      damage: w.damage * 0.5 * (p.damageMulti || 1),
+      life: 1.0,     // 1 second lingering trail
+      owner: p.id,
+      color: w.color,
+    });
+  }
 }
 
 function fireChain(g, w, p) {
   if (g.enemies.length === 0) return;
-  const sorted = g.enemies.slice().sort((a, b) => {
-    const da = (a.x - p.x) ** 2 + (a.y - p.y) ** 2;
-    const db = (b.x - p.x) ** 2 + (b.y - p.y) ** 2;
-    return da - db;
-  });
-  const inRange = sorted.filter(e => Math.hypot(e.x - p.x, e.y - p.y) < w.range);
-  if (inRange.length === 0) return;
-  emit(g, EVT.WEAPON_FIRE, { weapon: 'chain', pid: p.id });
-  const targets = [inRange[0]];
-  const hit = new Set([inRange[0]]);
+  // O(N) scan for the nearest in-range enemy — replaces slice+sort+filter
+  // (O(N log N)). Squared distance avoids Math.hypot in the hot path.
+  const rangeR2 = w.range * w.range;
+  let first = null, firstD2 = rangeR2;
+  for (const e of g.enemies) {
+    const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
+    if (d2 < firstD2) { first = e; firstD2 = d2; }
+  }
+  if (!first) return;
+  // w.type instead of 'chain' so thunder_god's chain burst reads as a
+  // thunder_god muzzle flash, not a base-chain one. Evolution bloom
+  // in simEventHandler needs the evolved name to apply its tier style.
+  emit(g, EVT.WEAPON_FIRE, { weapon: w.type, x: p.x, y: p.y, pid: p.id });
+  const targets = [first];
+  const hit = new Set([first]);
   const chains = w.chains + (p.projectileBonus || 0);
+  const chainR2 = w.chainRange * w.chainRange;
   for (let c = 0; c < chains && targets.length > 0; c++) {
     const last = targets[targets.length - 1];
-    let best = null, bestDist = w.chainRange;
+    let best = null, bestD2 = chainR2;
     for (const e of g.enemies) {
       if (hit.has(e)) continue;
-      const d = Math.hypot(e.x - last.x, e.y - last.y);
-      if (d < bestDist) { best = e; bestDist = d; }
+      const d2 = (e.x - last.x) ** 2 + (e.y - last.y) ** 2;
+      if (d2 < bestD2) { best = e; bestD2 = d2; }
     }
     if (best) { targets.push(best); hit.add(best); }
   }
@@ -104,8 +132,9 @@ function fireChain(g, w, p) {
   for (const t of targets) {
     chainPoints.push({ x: t.x, y: t.y });
     damageEnemy(g, t, w.damage * p.damageMulti, p.id);
+    applyStatus(g, t, { type: 'slow', remaining: 2.0, magnitude: 0.4, tickRate: 0 });
   }
-  g.chainEffects.push({ points: chainPoints, life: 0.2, color: w.color });
+  g.chainEffects.push({ points: chainPoints, life: 0.32, maxLife: 0.32, color: w.color });
 }
 
 function fireMeteor(g, w, p) {
@@ -126,11 +155,11 @@ function fireMeteor(g, w, p) {
 function fireDragonStorm(g, w, p) {
   if (g.enemies.length === 0) return;
   w.fireCount = (w.fireCount || 0) + 1;
-  if (w.fireCount % 3 === 1) emit(g, EVT.WEAPON_FIRE, { weapon: 'dragon_storm', pid: p.id });
-  let nearest = null, nearestDist = w.range;
+  if (w.fireCount % 3 === 1) emit(g, EVT.WEAPON_FIRE, { weapon: 'dragon_storm', x: p.x, y: p.y, pid: p.id });
+  let nearest = null, nearestD2 = w.range * w.range;
   for (const e of g.enemies) {
-    const d = Math.hypot(e.x - p.x, e.y - p.y);
-    if (d < nearestDist) { nearest = e; nearestDist = d; }
+    const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
+    if (d2 < nearestD2) { nearest = e; nearestD2 = d2; }
   }
   if (!nearest) return;
   const dx = nearest.x - p.x, dy = nearest.y - p.y;
@@ -147,6 +176,8 @@ function fireDragonStorm(g, w, p) {
       speed: w.speed, damage: w.damage, range: w.range,
       dist: 0, pierce: w.pierce, radius: 7, color: w.color,
       owner: p.id,
+      // Burn applied per hit in projectiles.js via statusOnHit.
+      statusOnHit: { type: 'burn', remaining: 3.0, magnitude: 8, tickRate: 0.5 },
     });
   }
 }
@@ -180,6 +211,8 @@ export function updateWeapons(g, dt) {
       if (w.type === 'meteor_orbit') tickMeteorOrbit(g, w, p, dt);
       if (w.type === 'fortress') tickFortressShield(g, w, p, dt);
       if (w.type === 'thunder_god' && w.timer >= w.cooldown - 0.01) tickThunderField(g, w, p);
+      if (w.type === 'inferno_wheel') tickInfernoWheel(g, w, p, dt);
+      if (w.type === 'tesla_aegis') tickTeslaAegis(g, w, p, dt);
     }
   }
 }
@@ -208,9 +241,11 @@ function tickShield(g, w, p, dt) {
   for (let j = g.enemies.length - 1; j >= 0; j--) {
     const e = g.enemies[j];
     const edx = e.x - p.x, edy = e.y - p.y;
-    const dist = Math.hypot(edx, edy);
-    if (dist < effectiveRadius + e.radius && dist > 1) {
+    const d2 = edx * edx + edy * edy;
+    const r = effectiveRadius + e.radius;
+    if (d2 < r * r && d2 > 1) {
       hit = true;
+      const dist = Math.sqrt(d2); // needed for knockback direction only
       const nx = edx / dist, ny = edy / dist;
       e.x += nx * w.knockback * dt;
       e.y += ny * w.knockback * dt;
@@ -232,7 +267,8 @@ function tickLightningField(g, w, p) {
   const targets = randomEnemiesInRange(g, p.x, p.y, effectiveRadius, zapCount);
   for (const t of targets) {
     damageEnemy(g, t, w.damage * p.damageMulti, p.id);
-    g.chainEffects.push({ points: [{ x: p.x, y: p.y }, { x: t.x, y: t.y }], life: 0.15, color: w.color });
+    applyStatus(g, t, { type: 'slow', remaining: 1.5, magnitude: 0.4, tickRate: 0 });
+    g.chainEffects.push({ points: [{ x: p.x, y: p.y }, { x: t.x, y: t.y }], life: 0.28, maxLife: 0.28, color: w.color });
   }
   if (targets.length > 0) emit(g, EVT.CHAIN_ZAP, { weapon: 'lightning_field', pid: p.id });
 }
@@ -257,8 +293,9 @@ function tickBreathAura(g, w, p, dt) {
   for (let j = g.enemies.length - 1; j >= 0; j--) {
     const e = g.enemies[j];
     const edx = p.x - e.x, edy = p.y - e.y;
-    const dist = Math.hypot(edx, edy);
-    if (dist < effectiveRadius + e.radius) {
+    // Squared distance — no sqrt needed; pure range comparison.
+    const r = effectiveRadius + e.radius;
+    if (edx * edx + edy * edy < r * r) {
       damageEnemy(g, e, w.damage * p.damageMulti * dt, p.id);
     }
   }
@@ -320,7 +357,7 @@ function tickThunderField(g, w, p) {
   const targets = randomEnemiesInRange(g, p.x, p.y, effectiveFieldR2, tgZapCount);
   for (const t of targets) {
     damageEnemy(g, t, w.fieldDamage * p.damageMulti, p.id);
-    g.chainEffects.push({ points: [{ x: p.x, y: p.y }, { x: t.x, y: t.y }], life: 0.15, color: w.color });
+    g.chainEffects.push({ points: [{ x: p.x, y: p.y }, { x: t.x, y: t.y }], life: 0.28, maxLife: 0.28, color: w.color });
   }
   if (targets.length > 0) emit(g, EVT.CHAIN_ZAP, { weapon: 'thunder_god', pid: p.id });
 }
@@ -368,9 +405,11 @@ function tickFortressShield(g, w, p, dt) {
   let hit = false;
   for (const e of g.enemies) {
     const edx = e.x - p.x, edy = e.y - p.y;
-    const dist = Math.hypot(edx, edy);
-    if (dist < effectiveRadius + e.radius && dist > 1) {
+    const d2 = edx * edx + edy * edy;
+    const r = effectiveRadius + e.radius;
+    if (d2 < r * r && d2 > 1) {
       hit = true;
+      const dist = Math.sqrt(d2);
       const nx = edx / dist, ny = edy / dist;
       e.x += nx * w.knockback * dt;
       e.y += ny * w.knockback * dt;
@@ -387,13 +426,19 @@ function tickFortressShield(g, w, p, dt) {
 }
 
 function fortressShockwave(g, w, p) {
+  // Muzzle/cast glow bloom at the dash endpoint — fires alongside the
+  // meteor explode ring below, so the client stacks the bloom on top of
+  // the expanding shockwave for a readable cast frame.
+  emit(g, EVT.WEAPON_FIRE, { weapon: 'fortress', x: p.x, y: p.y, pid: p.id });
   const effectiveShockR = w.shockwaveRadius * (p.sizeMulti || 1);
   for (const e of g.enemies) {
     const dx = e.x - p.x, dy = e.y - p.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < effectiveShockR + e.radius) {
+    const d2 = dx * dx + dy * dy;
+    const r = effectiveShockR + e.radius;
+    if (d2 < r * r) {
       damageEnemy(g, e, w.shockwaveDamage * p.damageMulti, p.id);
-      if (dist > 1) {
+      if (d2 > 1) {
+        const dist = Math.sqrt(d2);
         const push = 200;
         e.x += (dx / dist) * push * 0.05;
         e.y += (dy / dist) * push * 0.05;
@@ -408,7 +453,182 @@ function fortressShockwave(g, w, p) {
     damage: 0, life: 0.25, phase: 'explode',
     color: w.color, owner: p.id,
   });
-  emit(g, EVT.METEOR_EXPLODE, { x: p.x, y: p.y, color: w.color, radius: w.shockwaveRadius });
+  emit(g, EVT.METEOR_EXPLODE, { x: p.x, y: p.y, color: w.color, radius: w.shockwaveRadius, pid: p.id });
+}
+
+// --- Inferno Wheel ---
+// Breath + Orbit fusion. Orbit-style rotating blades with a much larger
+// contact radius (so it reads as fire, not a precise blade) and a burn
+// on every hit. Damage scaling matches orbit (× dt × 8) so it tunes the
+// same way.
+function tickInfernoWheel(g, w, p, dt) {
+  w.phase = (w.phase || 0) + w.rotSpeed * dt;
+  const effectiveOrbitR = w.radius * (p.sizeMulti || 1);
+  const effectiveBladeR = w.bladeRadius * (p.sizeMulti || 1);
+  const bladeCount = w.bladeCount + (p.projectileBonus || 0);
+  for (let b = 0; b < bladeCount; b++) {
+    const angle = w.phase + (b * Math.PI * 2 / bladeCount);
+    const bx = p.x + Math.cos(angle) * effectiveOrbitR;
+    const by = p.y + Math.sin(angle) * effectiveOrbitR;
+    for (let j = g.enemies.length - 1; j >= 0; j--) {
+      const e = g.enemies[j];
+      const dx = bx - e.x, dy = by - e.y;
+      if (dx * dx + dy * dy < (effectiveBladeR + e.radius) ** 2) {
+        damageEnemy(g, e, w.bladeDamage * p.damageMulti * dt * 8, p.id);
+        applyStatus(g, e, { type: 'burn', remaining: w.burnDuration, magnitude: w.burnDps, tickRate: 0.5 });
+      }
+    }
+  }
+}
+
+// --- Tesla Aegis ---
+// Chain + Shield fusion. Always-on knockback shield that also pulses a
+// chain zap every pulseCooldown. Shield tick mirrors tickFortressShield;
+// pulse mirrors fireChain but with a slow status on every link. The
+// pulseTimer is independent of w.timer so the shield's `cooldown:99999`
+// never blocks the pulse cadence.
+function tickTeslaAegis(g, w, p, dt) {
+  w.phase = (w.phase || 0) + dt * 4;
+  w.pulsePhase = (w.pulsePhase || 0) + dt * 6;
+
+  const effectiveRadius = w.shieldRadius * (p.sizeMulti || 1);
+  let hit = false;
+  for (const e of g.enemies) {
+    const edx = e.x - p.x, edy = e.y - p.y;
+    const d2 = edx * edx + edy * edy;
+    const r = effectiveRadius + e.radius;
+    if (d2 < r * r && d2 > 1) {
+      hit = true;
+      const dist = Math.sqrt(d2);
+      const nx = edx / dist, ny = edy / dist;
+      e.x += nx * w.knockback * dt;
+      e.y += ny * w.knockback * dt;
+      damageEnemy(g, e, w.shieldDamage * p.damageMulti * dt * 2, p.id);
+    }
+  }
+  if (hit) {
+    w._humTimer = (w._humTimer || 0) - dt;
+    if (w._humTimer <= 0) {
+      emit(g, EVT.SHIELD_HUM);
+      w._humTimer = 0.4;
+    }
+  }
+
+  w.pulseTimer = (w.pulseTimer || 0) - dt;
+  if (w.pulseTimer <= 0) {
+    w.pulseTimer = w.pulseCooldown;
+    fireTeslaAegisPulse(g, w, p);
+  }
+}
+
+function fireTeslaAegisPulse(g, w, p) {
+  w.pulseCount = (w.pulseCount || 0) + 1;
+  const overcharge = w.pulseCount > 0 && w.pulseCount % w.overchargeEvery === 0;
+  if (overcharge) {
+    const expandR = w.overchargeExpandR * (p.sizeMulti || 1);
+    for (const e of g.enemies) {
+      const dx = e.x - p.x, dy = e.y - p.y;
+      if (dx * dx + dy * dy >= expandR * expandR) continue;
+      damageEnemy(g, e, w.chainDamage * 2 * p.damageMulti, p.id);
+      e.stunTimer = Math.max(e.stunTimer || 0, w.overchargeStun);
+      applyStatus(g, e, { type: 'slow', remaining: 1.5, magnitude: 0.4, tickRate: 0 });
+    }
+    // Expanding ring read — reuse the meteor 'explode' phase since it
+    // already draws a ring that fades out, and it carries its own
+    // color field so it reads blue here instead of the usual orange.
+    g.meteorEffects.push({
+      x: p.x, y: p.y, radius: expandR,
+      damage: 0, life: w.overchargeExpandLife, phase: 'explode',
+      color: w.color, owner: p.id,
+    });
+    emit(g, EVT.CHAIN_ZAP, { weapon: 'tesla_aegis_overcharge', pid: p.id });
+    // Muzzle/cast bloom on overcharge only — normal pulses fire every
+    // 0.5s so blooming on each would spam the particle budget. The
+    // overcharge (every 4th) is the climactic beat worth tiering.
+    emit(g, EVT.WEAPON_FIRE, { weapon: 'tesla_aegis', x: p.x, y: p.y, pid: p.id });
+    return;
+  }
+
+  const effectiveRange = w.chainRange * (p.sizeMulti || 1);
+  const chainCount = w.chains + (p.projectileBonus || 0);
+  const hitSet = new Set();
+  let prevX = p.x, prevY = p.y;
+  const points = [{ x: p.x, y: p.y }];
+  let nextRange = effectiveRange;
+  for (let i = 0; i < chainCount; i++) {
+    let nearest = null, nearestD2 = nextRange * nextRange;
+    for (const e of g.enemies) {
+      if (hitSet.has(e)) continue;
+      const d2 = (e.x - prevX) ** 2 + (e.y - prevY) ** 2;
+      if (d2 < nearestD2) { nearest = e; nearestD2 = d2; }
+    }
+    if (!nearest) break;
+    hitSet.add(nearest);
+    damageEnemy(g, nearest, w.chainDamage * p.damageMulti, p.id);
+    applyStatus(g, nearest, { type: 'slow', remaining: 1.5, magnitude: 0.4, tickRate: 0 });
+    points.push({ x: nearest.x, y: nearest.y });
+    prevX = nearest.x; prevY = nearest.y;
+    // Tighter falloff after the first hop so chains wrap the shield
+    // rather than reaching across the screen.
+    nextRange = w.chainRange * 0.6;
+  }
+  if (points.length > 1) {
+    g.chainEffects.push({ points, life: 0.32, maxLife: 0.32, color: w.color });
+    emit(g, EVT.CHAIN_ZAP, { weapon: 'tesla_aegis', pid: p.id });
+  }
+}
+
+// --- Void Anchor ---
+function fireVoidAnchor(g, w, p) {
+  emit(g, EVT.WEAPON_FIRE, { weapon: 'void_anchor', x: p.x, y: p.y, pid: p.id });
+  const pullR = w.pullRadius * (p.sizeMulti || 1);
+  // O(N) scan replaces filter+sort (O(N) + O(K log K)). Squared distance
+  // avoids Math.hypot; picks the same nearest enemy as the old sort.
+  const pullR2 = pullR * pullR;
+  let nearest = null, nearestD2 = pullR2;
+  for (const e of g.enemies) {
+    const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
+    if (d2 < nearestD2) { nearest = e; nearestD2 = d2; }
+  }
+  if (nearest) damageEnemy(g, nearest, w.baseDamage * p.damageMulti, p.id);
+  if (!g.pendingPulls) g.pendingPulls = [];
+  g.pendingPulls.push({
+    x: p.x, y: p.y,
+    radius: pullR,
+    strength: w.pullStrength,
+    duration: 0.55,
+    elapsed: 0,
+  });
+  const impactR = w.impactRadius * (p.sizeMulti || 1);
+  g.meteorEffects.push({
+    x: p.x, y: p.y,
+    radius: impactR,
+    damage: w.impactDamage * p.damageMulti,
+    life: 0.7, warnLife: 0.7,
+    phase: 'warn',
+    color: w.color,
+    owner: p.id,
+  });
+  emit(g, EVT.METEOR_WARN, { x: p.x, y: p.y, radius: impactR });
+}
+
+export function updatePendingPulls(g, dt) {
+  if (!g.pendingPulls || g.pendingPulls.length === 0) return;
+  for (let i = g.pendingPulls.length - 1; i >= 0; i--) {
+    const pull = g.pendingPulls[i];
+    pull.elapsed += dt;
+    const r2 = pull.radius * pull.radius;
+    for (const e of g.enemies) {
+      const dx = pull.x - e.x;
+      const dy = pull.y - e.y;
+      if (dx * dx + dy * dy > r2) continue;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const force = pull.strength * dt;
+      e.x += (dx / d) * force;
+      e.y += (dy / d) * force;
+    }
+    if (pull.elapsed >= pull.duration) g.pendingPulls.splice(i, 1);
+  }
 }
 
 // --- chain + meteor effect lifetimes ---
@@ -419,6 +639,26 @@ export function updateChainEffects(g, dt) {
   }
 }
 
+// Charge fire-wake trails. Lingering damage zones left behind a Bull
+// Rush dash. Enemies walking through take half charge damage per tick
+// for 1 second. Rewards aggressive pathing through enemy packs.
+export function updateChargeTrails(g, dt) {
+  if (!g.chargeTrails) return;
+  for (let i = g.chargeTrails.length - 1; i >= 0; i--) {
+    const t = g.chargeTrails[i];
+    t.life -= dt;
+    if (t.life <= 0) { g.chargeTrails.splice(i, 1); continue; }
+    // Damage enemies overlapping this zone — per-tick dot, not burst.
+    for (const e of g.enemies) {
+      if (e.dying !== undefined) continue;
+      const dx = e.x - t.x, dy = e.y - t.y;
+      if (dx * dx + dy * dy < (t.radius + e.radius) ** 2) {
+        damageEnemy(g, e, t.damage * dt, t.owner);
+      }
+    }
+  }
+}
+
 export function updateMeteorEffects(g, dt) {
   for (let i = g.meteorEffects.length - 1; i >= 0; i--) {
     const m = g.meteorEffects[i];
@@ -426,12 +666,30 @@ export function updateMeteorEffects(g, dt) {
     if (m.phase === 'warn' && m.life <= 0) {
       m.phase = 'explode';
       m.life = 0.3;
-      emit(g, EVT.METEOR_EXPLODE, { x: m.x, y: m.y, color: m.color, radius: m.radius });
-      for (let j = g.enemies.length - 1; j >= 0; j--) {
-        const e = g.enemies[j];
-        const dx = m.x - e.x, dy = m.y - e.y;
-        if (dx * dx + dy * dy < (m.radius + e.radius) ** 2) {
-          damageEnemy(g, g.enemies[j], m.damage, m.owner);
+      emit(g, EVT.METEOR_EXPLODE, { x: m.x, y: m.y, color: m.color, radius: m.radius, pid: m.owner });
+      if (m.targetsPlayer) {
+        // Enemy-source blast (bomber death) — hits players, not other
+        // enemies. Obeys iframes so a bomber chain-kill doesn't one-shot
+        // the player through multiple overlapping rings.
+        for (const p of g.players) {
+          if (!p.alive || p.iframes > 0) continue;
+          const dx = m.x - p.x, dy = m.y - p.y;
+          if (dx * dx + dy * dy < (m.radius + p.radius) ** 2) {
+            const dmg = Math.max(1, m.damage - (p.armor || 0));
+            p.hp -= dmg;
+            p.iframes = 0.5;
+            emit(g, EVT.PLAYER_HIT, { x: p.x, y: p.y, dmg, by: m.sourceName || 'bomber', pid: p.id });
+          }
+        }
+      } else {
+        for (let j = g.enemies.length - 1; j >= 0; j--) {
+          const e = g.enemies[j];
+          const dx = m.x - e.x, dy = m.y - e.y;
+          if (dx * dx + dy * dy < (m.radius + e.radius) ** 2) {
+            damageEnemy(g, g.enemies[j], m.damage, m.owner);
+            // Meteor freeze — hard landing stuns enemies in the blast zone.
+            if (m.damage > 0) applyStatus(g, e, { type: 'freeze', remaining: 0.8, magnitude: 0, tickRate: 0 });
+          }
         }
       }
     } else if (m.phase === 'explode' && m.life <= 0) {
