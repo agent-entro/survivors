@@ -23,7 +23,7 @@ import { UNLOCKS, calculateScales, loadPrestige, savePrestige, applyPrestigeUnlo
 import { makeDrawSprite, drawHpBar, drawParticles, drawFloatingTexts, drawChainEffects, drawMeteorEffects, drawPendingPulls, drawPlayerBody, drawFacingIndicator, drawChargeTrail, spawnFireTrail, renderWorld } from './shared/render.js';
 import { getAmbient } from './shared/mapAmbient.js';
 import { synthesizeView } from './shared/view.js';
-import { applySimEvent } from './shared/simEventHandler.js';
+import { applySimEvent, resetParticleOverflow, didParticleOverflow } from './shared/simEventHandler.js';
 import { markSeen, getBestiaryEntries } from './shared/bestiary.js';
 import { ACHIEVEMENTS, loadAchievements, grantAchievement } from './shared/achievements.js';
 import { saveRunEntry } from './shared/runHistory.js';
@@ -386,13 +386,17 @@ function update(dt) {
     spawnFireTrail(p, dt, g.particles, g._trailState);
   }
 
-  // --- update particles ---
+  // --- update particles (swap-delete avoids O(N) splice per removal) ---
+  resetParticleOverflow();
   for (let i = g.particles.length - 1; i >= 0; i--) {
     const pt = g.particles[i];
     pt.x += pt.vx * dt;
     pt.y += pt.vy * dt;
     pt.life -= dt;
-    if (pt.life <= 0) g.particles.splice(i, 1);
+    if (pt.life <= 0) {
+      g.particles[i] = g.particles[g.particles.length - 1];
+      g.particles.pop();
+    }
   }
 
   // --- update floating texts ---
@@ -440,6 +444,8 @@ function update(dt) {
     }
     g.events.length = 0;
   }
+  // Forward particle overflow to perf harness (one event per frame max).
+  if (didParticleOverflow()) g.events.push({ type: 'PARTICLE_OVERFLOW' });
 
   // State-based milestone checks (run every frame, idempotent via grantAchievement).
   if (g.wave >= 10)  unlockAchievement('wave_10');

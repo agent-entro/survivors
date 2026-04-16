@@ -17,7 +17,7 @@ import { MAPS } from './shared/maps.js';
 import { loadPrestige } from './shared/prestige.js';
 import { makeDrawSprite, drawHpBar, drawParticles, drawFloatingTexts, drawChainEffects, drawMeteorEffects, drawPendingPulls, drawPlayerBody, drawFacingIndicator, drawChargeTrail, spawnFireTrail, renderWorld } from './shared/render.js';
 import { getAmbient } from './shared/mapAmbient.js';
-import { applySimEvent } from './shared/simEventHandler.js';
+import { applySimEvent, resetParticleOverflow, didParticleOverflow } from './shared/simEventHandler.js';
 import { markSeen, getBestiaryEntries } from './shared/bestiary.js';
 import { loadAchievements, ACHIEVEMENTS } from './shared/achievements.js';
 
@@ -950,12 +950,22 @@ function spawnParticles(x, y, color, count) {
 }
 
 function updateParticles(dt) {
+  // Swap-delete avoids O(N) splice per removal; backward iteration is safe
+  // because the swapped element (from array end) was already processed.
+  resetParticleOverflow();
   for (let i = particles.length - 1; i >= 0; i--) {
     const pt = particles[i];
     pt.x += pt.vx * dt;
     pt.y += pt.vy * dt;
     pt.life -= dt;
-    if (pt.life <= 0) particles.splice(i, 1);
+    if (pt.life <= 0) {
+      particles[i] = particles[particles.length - 1];
+      particles.pop();
+    }
+  }
+  // Forward overflow to perf harness via currState.events if available.
+  if (didParticleOverflow() && typeof currState !== 'undefined' && currState?.events) {
+    currState.events.push({ type: 'PARTICLE_OVERFLOW' });
   }
   for (let i = floatingTexts.length - 1; i >= 0; i--) {
     const ft = floatingTexts[i];
