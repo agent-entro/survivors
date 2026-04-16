@@ -18,6 +18,7 @@ export function tickSim(g, dt) {
   updateTerrain(g, dt);          // sets p._terrainSlow, applies hostile DoT
   updateWaves(g, dt);
   updateWeapons(g, dt);
+  updatePendingPulls(g, dt);    // pull enemies before they move this frame
   updateProjectiles(g, dt);
   updateAuras(g, dt);
   updateEnemies(g, dt);
@@ -25,5 +26,4 @@ export function tickSim(g, dt) {
   updateHearts(g, dt);
   updateChainEffects(g, dt);
   updateMeteorEffects(g, dt);
-  updatePendingPulls(g, dt);
 }

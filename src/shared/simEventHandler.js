@@ -326,6 +326,28 @@ export function applySimEvent(evt, client) {
       else if (evt.weapon === 'chain')        sfx('chain');
       else if (evt.weapon === 'dragon_storm') sfx('dragonstorm');
       else if (evt.weapon === 'thunder_god')  sfx('chain');
+      else if (evt.weapon === 'void_anchor') {
+        // Inward-spiral burst: particles start at radius 80-160 and
+        // fly toward the cast point to sell the gravitational implosion.
+        sfx('meteor'); // reuse until a dedicated void sfx is added
+        shake(0.08);
+        for (let i = 0; i < 16; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = 80 + Math.random() * 80;
+          const life = 0.28 + Math.random() * 0.22;
+          const speed = 130 + Math.random() * 90;
+          client.particles.push({
+            x: evt.x + Math.cos(angle) * dist,
+            y: evt.y + Math.sin(angle) * dist,
+            vx: -Math.cos(angle) * speed,
+            vy: -Math.sin(angle) * speed,
+            life, maxLife: life,
+            color: Math.random() < 0.6 ? '#6c5ce7' : '#2d1b6b',
+            radius: 2 + Math.random() * 3,
+          });
+        }
+        spawn(evt.x, evt.y, '#dfe6e9', 5); // white void-core flash
+      }
       break;
 
     case 'chargeBurst':
