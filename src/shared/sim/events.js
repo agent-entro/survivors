@@ -19,10 +19,27 @@ export const EVT = {
   BOSS_TELEGRAPH:      'bossTelegraph',
   CHARGE_BURST:        'chargeBurst',
   HIVE_BURST:          'hiveBurst',
+  BOSS_SPAWN:          'bossSpawn',
   EVOLUTION:           'evolution',
   WAVE_SURVIVED:       'waveSurvived',
+  CONSUMABLE_SPAWN:    'consumableSpawn',
+  CONSUMABLE_PICKUP:   'consumablePickup',
+  ENEMY_SHOOT:         'enemyShoot',
+  ENEMY_AIM:           'enemyAim',
+  BOSS_PHASE:          'bossPhase',
+  BOSS_TELEPORT:       'bossTeleport',
+  BOSS_RESURRECT:      'bossResurrect',
+  BOSS_AOE_WARN:       'bossAoeWarn',
+  BOSS_AOE_EXPLODE:    'bossAoeExplode',
+  STATUS_APPLIED:      'statusApplied',
+  STATUS_EXPIRED:      'statusExpired',
 };
 
+// Spread payload first so a stray `type` field in the payload (e.g.
+// consumables shipping a `ctype` discriminator) can't silently
+// overwrite the event-type tag that drives client dispatch. seb hit
+// this exact bug landing the consumable feature — caught it then,
+// hardening the helper here so it can't recur.
 export function emit(g, type, payload) {
-  g.events.push({ type, ...payload });
+  g.events.push({ ...payload, type });
 }
