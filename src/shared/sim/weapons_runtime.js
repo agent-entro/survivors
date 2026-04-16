@@ -38,10 +38,10 @@ function fireWeapon(g, w, p) {
 }
 
 function fireSpit(g, w, p) {
-  let nearest = null, nearestDist = w.range;
+  let nearest = null, nearestD2 = w.range * w.range;
   for (const e of g.enemies) {
-    const d = Math.hypot(e.x - p.x, e.y - p.y);
-    if (d < nearestDist) { nearest = e; nearestDist = d; }
+    const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
+    if (d2 < nearestD2) { nearest = e; nearestD2 = d2; }
   }
   if (!nearest) return;
   emit(g, EVT.WEAPON_FIRE, { weapon: 'spit', x: p.x, y: p.y, pid: p.id });
@@ -156,10 +156,10 @@ function fireDragonStorm(g, w, p) {
   if (g.enemies.length === 0) return;
   w.fireCount = (w.fireCount || 0) + 1;
   if (w.fireCount % 3 === 1) emit(g, EVT.WEAPON_FIRE, { weapon: 'dragon_storm', x: p.x, y: p.y, pid: p.id });
-  let nearest = null, nearestDist = w.range;
+  let nearest = null, nearestD2 = w.range * w.range;
   for (const e of g.enemies) {
-    const d = Math.hypot(e.x - p.x, e.y - p.y);
-    if (d < nearestDist) { nearest = e; nearestDist = d; }
+    const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
+    if (d2 < nearestD2) { nearest = e; nearestD2 = d2; }
   }
   if (!nearest) return;
   const dx = nearest.x - p.x, dy = nearest.y - p.y;
@@ -241,9 +241,11 @@ function tickShield(g, w, p, dt) {
   for (let j = g.enemies.length - 1; j >= 0; j--) {
     const e = g.enemies[j];
     const edx = e.x - p.x, edy = e.y - p.y;
-    const dist = Math.hypot(edx, edy);
-    if (dist < effectiveRadius + e.radius && dist > 1) {
+    const d2 = edx * edx + edy * edy;
+    const r = effectiveRadius + e.radius;
+    if (d2 < r * r && d2 > 1) {
       hit = true;
+      const dist = Math.sqrt(d2); // needed for knockback direction only
       const nx = edx / dist, ny = edy / dist;
       e.x += nx * w.knockback * dt;
       e.y += ny * w.knockback * dt;
@@ -291,8 +293,9 @@ function tickBreathAura(g, w, p, dt) {
   for (let j = g.enemies.length - 1; j >= 0; j--) {
     const e = g.enemies[j];
     const edx = p.x - e.x, edy = p.y - e.y;
-    const dist = Math.hypot(edx, edy);
-    if (dist < effectiveRadius + e.radius) {
+    // Squared distance — no sqrt needed; pure range comparison.
+    const r = effectiveRadius + e.radius;
+    if (edx * edx + edy * edy < r * r) {
       damageEnemy(g, e, w.damage * p.damageMulti * dt, p.id);
     }
   }
@@ -402,9 +405,11 @@ function tickFortressShield(g, w, p, dt) {
   let hit = false;
   for (const e of g.enemies) {
     const edx = e.x - p.x, edy = e.y - p.y;
-    const dist = Math.hypot(edx, edy);
-    if (dist < effectiveRadius + e.radius && dist > 1) {
+    const d2 = edx * edx + edy * edy;
+    const r = effectiveRadius + e.radius;
+    if (d2 < r * r && d2 > 1) {
       hit = true;
+      const dist = Math.sqrt(d2);
       const nx = edx / dist, ny = edy / dist;
       e.x += nx * w.knockback * dt;
       e.y += ny * w.knockback * dt;
@@ -428,10 +433,12 @@ function fortressShockwave(g, w, p) {
   const effectiveShockR = w.shockwaveRadius * (p.sizeMulti || 1);
   for (const e of g.enemies) {
     const dx = e.x - p.x, dy = e.y - p.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < effectiveShockR + e.radius) {
+    const d2 = dx * dx + dy * dy;
+    const r = effectiveShockR + e.radius;
+    if (d2 < r * r) {
       damageEnemy(g, e, w.shockwaveDamage * p.damageMulti, p.id);
-      if (dist > 1) {
+      if (d2 > 1) {
+        const dist = Math.sqrt(d2);
         const push = 200;
         e.x += (dx / dist) * push * 0.05;
         e.y += (dy / dist) * push * 0.05;
@@ -488,9 +495,11 @@ function tickTeslaAegis(g, w, p, dt) {
   let hit = false;
   for (const e of g.enemies) {
     const edx = e.x - p.x, edy = e.y - p.y;
-    const dist = Math.hypot(edx, edy);
-    if (dist < effectiveRadius + e.radius && dist > 1) {
+    const d2 = edx * edx + edy * edy;
+    const r = effectiveRadius + e.radius;
+    if (d2 < r * r && d2 > 1) {
       hit = true;
+      const dist = Math.sqrt(d2);
       const nx = edx / dist, ny = edy / dist;
       e.x += nx * w.knockback * dt;
       e.y += ny * w.knockback * dt;
@@ -547,11 +556,11 @@ function fireTeslaAegisPulse(g, w, p) {
   const points = [{ x: p.x, y: p.y }];
   let nextRange = effectiveRange;
   for (let i = 0; i < chainCount; i++) {
-    let nearest = null, nearestDist = nextRange;
+    let nearest = null, nearestD2 = nextRange * nextRange;
     for (const e of g.enemies) {
       if (hitSet.has(e)) continue;
-      const d = Math.hypot(e.x - prevX, e.y - prevY);
-      if (d < nearestDist) { nearest = e; nearestDist = d; }
+      const d2 = (e.x - prevX) ** 2 + (e.y - prevY) ** 2;
+      if (d2 < nearestD2) { nearest = e; nearestD2 = d2; }
     }
     if (!nearest) break;
     hitSet.add(nearest);
