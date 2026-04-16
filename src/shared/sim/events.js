@@ -33,6 +33,7 @@ export const EVT = {
   BOSS_AOE_EXPLODE:    'bossAoeExplode',
   STATUS_APPLIED:      'statusApplied',
   STATUS_EXPIRED:      'statusExpired',
+  BURN_TICK:           'burnTick',   // low-rate ember emit from burning enemies (sim-side)
 };
 
 // Spread payload first so a stray `type` field in the payload (e.g.

@@ -1269,5 +1269,25 @@ export function applySimEvent(evt, client) {
       }
       break;
     }
+
+    case 'burnTick': {
+      // Continuous rising embers from a burning enemy — emitted on the sim
+      // path (~4% chance/tick per burning enemy) so they go through the
+      // particle cap. Moved here from drawStatusTint in render.js so
+      // particle injection is off the render hot-path.
+      const { x, y, radius } = evt;
+      const ex = x + (Math.random() - 0.5) * radius * 1.2;
+      const ey = y + (Math.random() - 0.5) * radius * 0.4;
+      pushParticle(client.particles, {
+        x: ex, y: ey,
+        vx: (Math.random() - 0.5) * 20,
+        vy: -40 - Math.random() * 30,
+        life: 0.5 + Math.random() * 0.3,
+        maxLife: 0.8,
+        radius: 1.4 + Math.random(),
+        color: Math.random() < 0.6 ? '#f39c12' : '#e74c3c',
+      });
+      break;
+    }
   }
 }

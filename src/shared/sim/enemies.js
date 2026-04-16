@@ -444,6 +444,10 @@ function updateEnemyTick(g, dt, hash) {
             damageEnemy(g, e, s.magnitude, null);
             s.tickAccum -= s.tickRate;
           }
+          // Low-rate ember emit on the sim path (~4% chance/tick per burning
+          // enemy) so simEventHandler can push particles respecting the cap.
+          // Uses Math.random() — cosmetic, not replicated to server.
+          if (Math.random() < 0.04) emit(g, EVT.BURN_TICK, { x: e.x, y: e.y, radius: e.radius });
         } else if (s.type === 'slow') {
           speedMod = Math.min(speedMod, s.magnitude);
         } else if (s.type === 'freeze') {

@@ -154,7 +154,7 @@ export function drawEnemies(ctx, enemies, drawSprite, cx, cy, W, H, onSeen, part
     // the battlefield can tell which enemies are slowed/burning/
     // frozen at a glance instead of having to remember.
     if (e.statusEffects && e.statusEffects.length > 0) {
-      drawStatusTint(ctx, e, particles);
+      drawStatusTint(ctx, e);
     }
 
     if (e.hp < e.maxHp) {
@@ -304,7 +304,11 @@ function shadeHex(hex, pct) {
 // orange (sin-driven so it reads as flames), slow gets a steady blue
 // glow, freeze gets a cyan-white frost shell + 4 ice shards on the
 // rim. Multiple statuses stack — burn over slow over freeze.
-function drawStatusTint(ctx, e, particles) {
+// Ember particles for burn are emitted by the sim via BURN_TICK events
+// (enemies.js ~4% chance/tick per burning enemy) so they route through
+// the particle cap in simEventHandler — render.js no longer writes to
+// the particles array directly.
+function drawStatusTint(ctx, e) {
   for (const s of e.statusEffects) {
     if (s.type === 'burn') {
       const flick = 0.3 + Math.sin(performance.now() / 80 + e.x * 0.05) * 0.15;
@@ -312,23 +316,6 @@ function drawStatusTint(ctx, e, particles) {
       ctx.beginPath();
       ctx.arc(e.x, e.y, e.radius * 0.95, 0, Math.PI * 2);
       ctx.fill();
-      // Continuous rising embers — small chance per frame per burning
-      // enemy so the fire visibly emits smoke over the whole burn
-      // duration, not just the apply pop. Capped by probability so a
-      // mass-burn doesn't flood the particle buffer.
-      if (particles && Math.random() < 0.15) {
-        const ex = e.x + (Math.random() - 0.5) * e.radius * 1.2;
-        const ey = e.y + (Math.random() - 0.5) * e.radius * 0.4;
-        particles.push({
-          x: ex, y: ey,
-          vx: (Math.random() - 0.5) * 20,
-          vy: -40 - Math.random() * 30,
-          life: 0.5 + Math.random() * 0.3,
-          maxLife: 0.8,
-          radius: 1.4 + Math.random(),
-          color: Math.random() < 0.6 ? '#f39c12' : '#e74c3c',
-        });
-      }
     } else if (s.type === 'slow') {
       ctx.fillStyle = 'rgba(52, 152, 219, 0.25)';
       ctx.beginPath();
