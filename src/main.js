@@ -28,10 +28,12 @@ import { makeDrawSprite, drawHpBar, drawParticles, drawFloatingTexts, drawChainE
 import { getAmbient } from './shared/mapAmbient.js';
 import { synthesizeView } from './shared/view.js';
 import { applySimEvent, resetParticleOverflow, safeParticlePush } from './shared/simEventHandler.js';
-import { markSeen, getBestiaryEntries } from './shared/bestiary.js';
+import { markSeen } from './shared/bestiary.js';
+import { showBestiary, hideBestiary } from './shared/bestiaryUI.js';
 import { ACHIEVEMENTS, loadAchievements, grantAchievement } from './shared/achievements.js';
 import { saveRunEntry } from './shared/runHistory.js';
 import { createBaseGameState } from './shared/gameState.js';
+import { renderDeathFeed } from './shared/deathFeed.js';
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -930,22 +932,7 @@ function render() {
   }
 
   // --- death feed (bottom-left, fading) ---
-  const feedMax = 5;
-  const feedDuration = 6; // seconds visible
-  const recentFeed = g.deathFeed.slice(-feedMax);
-  for (let i = 0; i < recentFeed.length; i++) {
-    const entry = recentFeed[i];
-    const age = g.time - entry.time;
-    if (age > feedDuration) continue;
-    const alpha = age > feedDuration - 1 ? (feedDuration - age) : 1;
-    ctx.save();
-    ctx.globalAlpha = alpha * 0.7;
-    ctx.fillStyle = '#ccc';
-    ctx.font = '10px "Chakra Petch", sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText(entry.text, 12, H - 20 - (recentFeed.length - 1 - i) * 16);
-    ctx.restore();
-  }
+  renderDeathFeed(ctx, g.deathFeed, g.time, H);
 
   // --- HUD ---
   // setHud only writes to DOM when the value changed — saves ~300
@@ -1315,34 +1302,3 @@ if (typeof window !== 'undefined') {
   }
 }
 
-// --- bestiary UI ---
-function showBestiary() {
-  const overlay = document.getElementById('bestiary');
-  const grid = document.getElementById('bestiary-grid');
-  const progress = document.getElementById('bestiary-progress');
-  const entries = getBestiaryEntries();
-  const seen = entries.filter(e => e.firstWave !== null).length;
-  if (progress) progress.textContent = `${seen} / ${entries.length} discovered`;
-  grid.innerHTML = entries.map(e => {
-    if (e.firstWave === null) {
-      return `<div class="beast-card unseen">
-        <div class="beast-swatch unseen"></div>
-        <div class="beast-name">???</div>
-        <div class="beast-wave">undiscovered</div>
-        <div class="beast-stats">hp - · spd - · dmg -</div>
-        <div class="beast-desc">Keep playing to unlock.</div>
-      </div>`;
-    }
-    return `<div class="beast-card">
-      <div class="beast-swatch" style="background:${e.color}; color:${e.color};"></div>
-      <div class="beast-name">${escapeHTML(e.info.display)}</div>
-      <div class="beast-wave">first seen: wave ${e.firstWave}</div>
-      <div class="beast-stats">hp ${e.baseStats.hp} · spd ${e.baseStats.speed} · dmg ${e.baseStats.damage}</div>
-      <div class="beast-desc">${escapeHTML(e.info.desc)}</div>
-    </div>`;
-  }).join('');
-  overlay.style.display = 'flex';
-}
-function hideBestiary() {
-  document.getElementById('bestiary').style.display = 'none';
-}
