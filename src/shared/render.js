@@ -344,9 +344,21 @@ function drawStatusTint(ctx, e) {
 // sprite with shadow glow, colored-circle fallback. If `particles` is
 // passed, drops occasional embers behind each projectile so the trail
 // reads through the sprite at high speed.
+//
+// Three-pass structure batches shadow state: one ctx.shadowBlur set and
+// one reset per call instead of N×2. shadowColor updates only on color
+// transitions — O(distinct colors) state changes instead of O(N).
 export function drawProjectiles(ctx, projectiles, drawSprite, particles, cx, cy, W, H) {
+  // Pre-filter to visible set so each pass avoids the per-projectile check.
+  const vis = [];
   for (const proj of projectiles) {
     if (proj.x < cx - 30 || proj.x > cx + W + 30 || proj.y < cy - 30 || proj.y > cy + H + 30) continue;
+    vis.push(proj);
+  }
+  if (vis.length === 0) return;
+
+  // Pass 1: trails — no shadow state needed
+  for (const proj of vis) {
     const speed = Math.sqrt(proj.vx * proj.vx + proj.vy * proj.vy);
     if (speed > 0) {
       const nx = -proj.vx / speed;
@@ -366,19 +378,29 @@ export function drawProjectiles(ctx, projectiles, drawSprite, particles, cx, cy,
         }
       }
     }
-    ctx.shadowColor = proj.color;
-    ctx.shadowBlur = 14;
+  }
+
+  // Pass 2: bodies with shadow — blur set once, color updated only on transition
+  ctx.shadowBlur = 14;
+  let lastColor = null;
+  for (const proj of vis) {
+    if (proj.color !== lastColor) {
+      ctx.shadowColor = proj.color;
+      lastColor = proj.color;
+    }
     if (!drawSprite('spit', proj.x, proj.y, 0.7)) {
       ctx.fillStyle = proj.color;
       ctx.beginPath();
       ctx.arc(proj.x, proj.y, proj.radius, 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.shadowBlur = 0;
-    // Bright inner core on top of the sprite — small near-white dot
-    // that punches through at wave density when the body color gets
-    // lost in the swarm. One extra arc/fill per projectile, no new
-    // state, no new shadow passes.
+  }
+  ctx.shadowBlur = 0;
+
+  // Pass 3: inner cores + embers — no shadow
+  // Bright inner core punches through at wave density when the body color
+  // gets lost in the swarm.
+  for (const proj of vis) {
     ctx.fillStyle = 'rgba(255,255,255,0.6)';
     ctx.beginPath();
     ctx.arc(proj.x, proj.y, proj.radius * 0.45, 0, Math.PI * 2);
@@ -406,11 +428,21 @@ export function drawProjectiles(ctx, projectiles, drawSprite, particles, cx, cy,
 //
 // `p.homing` (boss phase 3) gets an extra pulsing tracking ring so
 // players can tell "this one curves" without watching it for a beat.
+//
+// Three-pass structure (trails+rings / bodies+cores with shadow / sparks)
+// batches shadowBlur to one set+reset per call instead of N×2.
 export function drawEnemyProjectiles(ctx, projectiles, particles, cx, cy, W, H, time) {
+  // Pre-filter to visible set so each pass skips the viewport check.
+  const vis = [];
   for (const p of projectiles) {
     if (p.x < cx - 30 || p.x > cx + W + 30 || p.y < cy - 30 || p.y > cy + H + 30) continue;
+    vis.push(p);
+  }
+  if (vis.length === 0) return;
+
+  // Pass 1: ghostly trails + homing rings — no shadow state needed
+  for (const p of vis) {
     const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
-    // Ghostly trail
     if (speed > 0) {
       const nx = -p.vx / speed, ny = -p.vy / speed;
       for (let t = 1; t <= 3; t++) {
@@ -423,8 +455,7 @@ export function drawEnemyProjectiles(ctx, projectiles, particles, cx, cy, W, H, 
       ctx.globalAlpha = 1;
     }
     // Homing tracking ring — pulses between r*1.4 and r*2.2 with a
-    // sin tied to time + position so adjacent homers don't pulse
-    // in sync. Outside the main body so it reads as targeting halo.
+    // sin tied to time + position so adjacent homers don't pulse in sync.
     if (p.homing) {
       const pulse = 1.4 + (Math.sin((time || 0) * 8 + p.x * 0.05) * 0.5 + 0.5) * 0.8;
       ctx.strokeStyle = p.color;
@@ -435,20 +466,33 @@ export function drawEnemyProjectiles(ctx, projectiles, particles, cx, cy, W, H, 
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
-    // Main body — outer glow + bright core
-    ctx.shadowColor = p.color;
-    ctx.shadowBlur = 12;
+  }
+
+  // Pass 2: main bodies + white-hot cores — shadow set once, color
+  // updated only on transitions (O(colors) instead of O(N)).
+  ctx.shadowBlur = 12;
+  let lastColor = null;
+  for (const p of vis) {
+    if (p.color !== lastColor) {
+      ctx.shadowColor = p.color;
+      lastColor = p.color;
+    }
     ctx.fillStyle = p.color;
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
     ctx.fill();
-    // White-hot core
+    // White-hot core — drawn inside the shadow block so it inherits the
+    // glow (matching original behavior where core followed the body draw
+    // before shadowBlur was reset).
     ctx.fillStyle = '#fff';
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.radius * 0.4, 0, Math.PI * 2);
     ctx.fill();
-    ctx.shadowBlur = 0;
-    // Spark particles
+  }
+  ctx.shadowBlur = 0;
+
+  // Pass 3: spark particles
+  for (const p of vis) {
     if (particles && Math.random() < 0.3) {
       particles.push({
         x: p.x + (Math.random() - 0.5) * 4,
