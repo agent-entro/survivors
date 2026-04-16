@@ -19,7 +19,7 @@ import { MAPS } from './src/shared/maps.js';
 import { pushOutOfObstacles } from './src/shared/sim/collision.js';
 import { applyUnlocks, sanitizePrestige } from './src/shared/prestige.js';
 
-const MAP_ROTATION = ['arena', 'forest', 'ruins', 'graveyard'];
+const MAP_ROTATION = ['arena', 'forest', 'ruins', 'graveyard', 'neon'];
 function pickMapId(rng) {
   return MAP_ROTATION[rng.int(MAP_ROTATION.length)];
 }
@@ -292,11 +292,13 @@ function snapshotWeapon(w) {
     o.chargeDx = r2(w.chargeDx);
     o.chargeDy = r2(w.chargeDy);
   }
-  // Charge weapon dash trail — only meaningful while active. Ships
+  // Charge + fortress dash trail — only meaningful while active. Ships
   // enough fields for drawChargeTrail to reconstruct the tapered
   // streak + speed lines + slash arc (speed/duration static per run,
-  // chargeTimer is the animated one).
-  if (w.type === 'charge' && w.active) {
+  // chargeTimer is the animated one). Fortress reuses the same charge
+  // sweep fields (speed/duration/chargeTimer/width) so the same gate
+  // covers both.
+  if ((w.type === 'charge' || w.type === 'fortress') && w.active) {
     o.speed = w.speed;
     o.duration = w.duration;
     o.chargeTimer = r2(w.chargeTimer);

@@ -161,6 +161,111 @@ function sfx(type) {
         o2.start(t + 0.03); o2.stop(t + 0.12);
         break;
       }
+      case 'charge': {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(150, t);
+        osc.frequency.linearRampToValueAtTime(300, t + 0.08);
+        osc.frequency.linearRampToValueAtTime(80, t + 0.15);
+        gain.gain.setValueAtTime(0.15, t);
+        gain.gain.linearRampToValueAtTime(0.08, t + 0.08);
+        gain.gain.linearRampToValueAtTime(0, t + 0.2);
+        osc.start(t); osc.stop(t + 0.2);
+        break;
+      }
+      case 'hive_burst': {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(180, t);
+        osc.frequency.linearRampToValueAtTime(90, t + 0.08);
+        osc.frequency.linearRampToValueAtTime(200, t + 0.12);
+        osc.frequency.linearRampToValueAtTime(60, t + 0.2);
+        gain.gain.setValueAtTime(0.12, t);
+        gain.gain.linearRampToValueAtTime(0.08, t + 0.08);
+        gain.gain.linearRampToValueAtTime(0, t + 0.2);
+        osc.start(t); osc.stop(t + 0.2);
+        const hb2 = ac.createOscillator();
+        const hg2 = ac.createGain();
+        hb2.connect(hg2); hg2.connect(ac.destination);
+        hb2.type = 'square';
+        hb2.frequency.setValueAtTime(500, t + 0.02);
+        hb2.frequency.linearRampToValueAtTime(250, t + 0.1);
+        hb2.frequency.linearRampToValueAtTime(600, t + 0.15);
+        hg2.gain.setValueAtTime(0.04, t + 0.02);
+        hg2.gain.linearRampToValueAtTime(0, t + 0.18);
+        hb2.start(t + 0.02); hb2.stop(t + 0.18);
+        break;
+      }
+      case 'boss_telegraph': {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(60, t);
+        osc.frequency.linearRampToValueAtTime(180, t + 0.25);
+        gain.gain.setValueAtTime(0.05, t);
+        gain.gain.linearRampToValueAtTime(0.18, t + 0.2);
+        gain.gain.linearRampToValueAtTime(0, t + 0.3);
+        osc.start(t); osc.stop(t + 0.3);
+        const bt2 = ac.createOscillator();
+        const bg2 = ac.createGain();
+        bt2.connect(bg2); bg2.connect(ac.destination);
+        bt2.type = 'square';
+        bt2.frequency.setValueAtTime(300, t + 0.1);
+        bt2.frequency.linearRampToValueAtTime(600, t + 0.25);
+        bg2.gain.setValueAtTime(0.03, t + 0.1);
+        bg2.gain.linearRampToValueAtTime(0.08, t + 0.22);
+        bg2.gain.linearRampToValueAtTime(0, t + 0.3);
+        bt2.start(t + 0.1); bt2.stop(t + 0.3);
+        break;
+      }
+      case 'boss_step': {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(50, t);
+        osc.frequency.linearRampToValueAtTime(30, t + 0.1);
+        gain.gain.setValueAtTime(0.1, t);
+        gain.gain.linearRampToValueAtTime(0, t + 0.12);
+        osc.start(t); osc.stop(t + 0.12);
+        break;
+      }
+      case 'shield_hum': {
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(220, t);
+        osc.frequency.linearRampToValueAtTime(260, t + 0.06);
+        osc.frequency.linearRampToValueAtTime(220, t + 0.12);
+        gain.gain.setValueAtTime(0.05, t);
+        gain.gain.linearRampToValueAtTime(0.08, t + 0.04);
+        gain.gain.linearRampToValueAtTime(0, t + 0.12);
+        osc.start(t); osc.stop(t + 0.12);
+        break;
+      }
+      case 'heal': {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(523, t);
+        osc.frequency.linearRampToValueAtTime(784, t + 0.1);
+        gain.gain.setValueAtTime(0.1, t);
+        gain.gain.linearRampToValueAtTime(0.06, t + 0.08);
+        gain.gain.linearRampToValueAtTime(0, t + 0.15);
+        osc.start(t); osc.stop(t + 0.15);
+        const ho2 = ac.createOscillator();
+        const hg2 = ac.createGain();
+        ho2.connect(hg2); hg2.connect(ac.destination);
+        ho2.type = 'sine';
+        ho2.frequency.setValueAtTime(659, t + 0.05);
+        ho2.frequency.linearRampToValueAtTime(1047, t + 0.15);
+        hg2.gain.setValueAtTime(0.06, t + 0.05);
+        hg2.gain.linearRampToValueAtTime(0, t + 0.2);
+        ho2.start(t + 0.05); ho2.stop(t + 0.2);
+        break;
+      }
+      case 'zap': {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(2000, t);
+        osc.frequency.linearRampToValueAtTime(600, t + 0.03);
+        osc.frequency.linearRampToValueAtTime(1800, t + 0.05);
+        osc.frequency.linearRampToValueAtTime(400, t + 0.08);
+        gain.gain.setValueAtTime(0.07, t);
+        gain.gain.linearRampToValueAtTime(0.04, t + 0.03);
+        gain.gain.linearRampToValueAtTime(0.06, t + 0.05);
+        gain.gain.linearRampToValueAtTime(0, t + 0.08);
+        osc.start(t); osc.stop(t + 0.08);
+        break;
+      }
       default:
         gain.gain.setValueAtTime(0, t);
         osc.start(t); osc.stop(t + 0.01);
@@ -250,7 +355,7 @@ let obstacles = [];
 let bgCanvas = null;
 
 // --- map vote ---
-const MAP_VOTE_EMOJIS = { arena: '⚔️', forest: '🌲', ruins: '🏛️', graveyard: '💀' };
+const MAP_VOTE_EMOJIS = { arena: '⚔️', forest: '🌲', ruins: '🏛️', graveyard: '💀', neon: '⚡' };
 let myVote = null;
 let voteCountdownTimer = null;
 
@@ -338,6 +443,7 @@ const TICK_DT = 1 / 20;  // server sends at 20Hz
 let particles = [];
 let floatingTexts = [];
 let screenShake = 0;
+let levelFlash = 0;
 // Per-player fire-trail throttle, shared helper owns the write — we
 // just own the Map so state survives between render frames.
 const trailState = new Map();
@@ -352,6 +458,7 @@ const mpEventClient = {
   floatingTexts,
   sfx,
   shake(v) { screenShake = Math.max(screenShake, v); },
+  flash(v) { levelFlash = Math.max(levelFlash, v); },
   isMe: (pid) => pid === myId,
   // Suppress levelup sfx through the event path — the separate
   // `levelup` server message already triggers it via
@@ -584,7 +691,7 @@ function respawnGame() {
 function showDeathScreen(state, me) {
   const mins = Math.floor(state.time / 60);
   const secs = Math.floor(state.time % 60);
-  const weaponList = (me.weapons || []).map(w => WEAPON_ICONS[w] || '?').join(' ');
+  const weaponList = (me.weapons || []).map(w => WEAPON_ICONS[w.type] || '?').join(' ');
   document.getElementById('death-stats').innerHTML = `
     Survived: ${mins}:${secs.toString().padStart(2, '0')}<br>
     Level: ${me.level} · Wave: ${state.wave}<br>
@@ -629,6 +736,7 @@ function updateParticles(dt) {
     if (ft.life <= 0) floatingTexts.splice(i, 1);
   }
   if (screenShake > 0) screenShake -= dt;
+  if (levelFlash > 0) levelFlash = Math.max(0, levelFlash - dt);
 }
 
 // ============================================================
@@ -865,6 +973,15 @@ function render(dt) {
 
   ctx.restore();
 
+  // --- level-up flash overlay (matches SP: white wash, fades from 0.3 alpha) ---
+  if (levelFlash > 0) {
+    ctx.save();
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = (levelFlash / 0.15) * 0.3;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
   // --- spectator label ---
   if (me && !me.alive) {
     const alive = state.players.filter(p => p.alive);
@@ -918,7 +1035,7 @@ function render(dt) {
     document.getElementById('hud-kills').textContent = `${state.kills} kills`;
     document.getElementById('hud-wave').textContent = `Wave ${state.wave}`;
     if (me) {
-      document.getElementById('hud-weapons').textContent = (me.weapons || []).map(w => WEAPON_ICONS[w] || '?').join(' ');
+      document.getElementById('hud-weapons').textContent = (me.weapons || []).map(w => WEAPON_ICONS[w.type] || '?').join(' ');
       document.getElementById('hud-level').textContent = `Lv ${me.level}`;
       const xpFill = document.getElementById('xp-fill');
       if (xpFill) xpFill.style.width = `${Math.min(100, (me.xp / me.xpToLevel) * 100)}%`;
