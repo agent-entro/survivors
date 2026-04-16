@@ -1238,6 +1238,71 @@ suite('Level-up Card Weapon Preview', () => {
   });
 });
 
+// ── Determinism: O(N) chain + voidAnchor target selection ───────
+// Verifies the O(N) single-pass nearest-enemy scan picks the same
+// target as the old slice+sort approach would. Seeded RNG so enemies
+// positions are deterministic; enemies placed at known distances.
+suite('O(N) weapon targeting determinism', () => {
+  function makeEnemy(x, y) {
+    return {
+      x, y, radius: 12, hp: 200, maxHp: 200,
+      dying: undefined, statusResist: 0, statusEffects: [],
+      speed: 0, vx: 0, vy: 0, name: 'blob',
+    };
+  }
+
+  test('fireChain: O(N) scan hits nearest in-range enemy first', () => {
+    const g = makeGame({ seed: 77 });
+    const p = g.player;
+    p.x = 1000; p.y = 1000;
+    p.weapons = [createWeapon('chain')];
+    const w = p.weapons[0];
+    // Disable wave spawns so only our test enemies are present.
+    g.waveTimer = -999; g.spawnTimer = 9999;
+    // chain range=250u; place enemies at 80 (nearest), 150 (in range), 400 (out).
+    const near   = makeEnemy(p.x + 80,  p.y);
+    const mid    = makeEnemy(p.x + 150, p.y);
+    const far    = makeEnemy(p.x + 400, p.y); // beyond range
+    g.enemies = [far, mid, near]; // deliberately disordered
+    // w.timer starts at 0 — fires on first tick (timer -= dt → negative → fires).
+    tickSim(g, 1 / 60);
+    assert(near.hp < 200, `nearest enemy (80u) took chain damage: hp=${near.hp}`);
+    assert(far.hp === 200, `out-of-range enemy (400u) untouched: hp=${far.hp}`);
+  });
+
+  test('fireChain: array insertion order does not change first-target', () => {
+    // Same geometry, enemies in ascending distance order — result must match.
+    const g = makeGame({ seed: 77 });
+    const p = g.player;
+    p.x = 1000; p.y = 1000;
+    p.weapons = [createWeapon('chain')];
+    g.waveTimer = -999; g.spawnTimer = 9999;
+    const near  = makeEnemy(p.x + 80,  p.y);
+    const mid   = makeEnemy(p.x + 150, p.y);
+    const far   = makeEnemy(p.x + 400, p.y);
+    g.enemies = [near, mid, far]; // ascending order this time
+    tickSim(g, 1 / 60);
+    assert(near.hp < 200, `nearest enemy still took damage regardless of array order: hp=${near.hp}`);
+    assert(far.hp === 200, `far enemy still untouched: hp=${far.hp}`);
+  });
+
+  test('fireVoidAnchor: O(N) scan hits nearest enemy in pullRadius', () => {
+    const g = makeGame({ seed: 88 });
+    const p = g.player;
+    p.x = 1000; p.y = 1000;
+    p.weapons = [createWeapon('void_anchor')];
+    g.waveTimer = -999; g.spawnTimer = 9999;
+    // void_anchor pullRadius=200u; enemies at 80u (in), 150u (in), 300u (out).
+    const near = makeEnemy(p.x + 80,  p.y);
+    const mid  = makeEnemy(p.x + 150, p.y);
+    const far  = makeEnemy(p.x + 300, p.y); // outside pullRadius
+    g.enemies = [far, mid, near]; // disordered
+    tickSim(g, 1 / 60);
+    assert(near.hp < 200, `void_anchor opener hit nearest (80u): hp=${near.hp}`);
+    assert(far.hp === 200, `far enemy (300u, outside pullRadius) untouched: hp=${far.hp}`);
+  });
+});
+
 // ── Summary ─────────────────────────────────────────────────────
 console.log(`\n${'═'.repeat(50)}`);
 console.log(`Tests: ${totalPassed} passed, ${totalFailed} failed`);

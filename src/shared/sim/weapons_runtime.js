@@ -101,27 +101,30 @@ function fireCharge(g, w, p) {
 
 function fireChain(g, w, p) {
   if (g.enemies.length === 0) return;
-  const sorted = g.enemies.slice().sort((a, b) => {
-    const da = (a.x - p.x) ** 2 + (a.y - p.y) ** 2;
-    const db = (b.x - p.x) ** 2 + (b.y - p.y) ** 2;
-    return da - db;
-  });
-  const inRange = sorted.filter(e => Math.hypot(e.x - p.x, e.y - p.y) < w.range);
-  if (inRange.length === 0) return;
+  // O(N) scan for the nearest in-range enemy — replaces slice+sort+filter
+  // (O(N log N)). Squared distance avoids Math.hypot in the hot path.
+  const rangeR2 = w.range * w.range;
+  let first = null, firstD2 = rangeR2;
+  for (const e of g.enemies) {
+    const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
+    if (d2 < firstD2) { first = e; firstD2 = d2; }
+  }
+  if (!first) return;
   // w.type instead of 'chain' so thunder_god's chain burst reads as a
   // thunder_god muzzle flash, not a base-chain one. Evolution bloom
   // in simEventHandler needs the evolved name to apply its tier style.
   emit(g, EVT.WEAPON_FIRE, { weapon: w.type, x: p.x, y: p.y, pid: p.id });
-  const targets = [inRange[0]];
-  const hit = new Set([inRange[0]]);
+  const targets = [first];
+  const hit = new Set([first]);
   const chains = w.chains + (p.projectileBonus || 0);
+  const chainR2 = w.chainRange * w.chainRange;
   for (let c = 0; c < chains && targets.length > 0; c++) {
     const last = targets[targets.length - 1];
-    let best = null, bestDist = w.chainRange;
+    let best = null, bestD2 = chainR2;
     for (const e of g.enemies) {
       if (hit.has(e)) continue;
-      const d = Math.hypot(e.x - last.x, e.y - last.y);
-      if (d < bestDist) { best = e; bestDist = d; }
+      const d2 = (e.x - last.x) ** 2 + (e.y - last.y) ** 2;
+      if (d2 < bestD2) { best = e; bestD2 = d2; }
     }
     if (best) { targets.push(best); hit.add(best); }
   }
@@ -570,9 +573,14 @@ function fireTeslaAegisPulse(g, w, p) {
 function fireVoidAnchor(g, w, p) {
   emit(g, EVT.WEAPON_FIRE, { weapon: 'void_anchor', x: p.x, y: p.y, pid: p.id });
   const pullR = w.pullRadius * (p.sizeMulti || 1);
-  const nearest = g.enemies
-    .filter(e => Math.hypot(e.x - p.x, e.y - p.y) < pullR)
-    .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0];
+  // O(N) scan replaces filter+sort (O(N) + O(K log K)). Squared distance
+  // avoids Math.hypot; picks the same nearest enemy as the old sort.
+  const pullR2 = pullR * pullR;
+  let nearest = null, nearestD2 = pullR2;
+  for (const e of g.enemies) {
+    const d2 = (e.x - p.x) ** 2 + (e.y - p.y) ** 2;
+    if (d2 < nearestD2) { nearest = e; nearestD2 = d2; }
+  }
   if (nearest) damageEnemy(g, nearest, w.baseDamage * p.damageMulti, p.id);
   if (!g.pendingPulls) g.pendingPulls = [];
   g.pendingPulls.push({
