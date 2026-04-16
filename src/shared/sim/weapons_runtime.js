@@ -33,6 +33,7 @@ function fireWeapon(g, w, p) {
   else if (w.type === 'thunder_god')  fireThunderGod(g, w, p);
   else if (w.type === 'meteor_orbit') fireMeteor(g, w, p);
   else if (w.type === 'fortress')     fireCharge(g, w, p);
+  else if (w.type === 'void_anchor')  fireVoidAnchor(g, w, p);
 }
 
 function fireSpit(g, w, p) {
@@ -437,5 +438,68 @@ export function updateMeteorEffects(g, dt) {
     } else if (m.phase === 'explode' && m.life <= 0) {
       g.meteorEffects.splice(i, 1);
     }
+  }
+}
+
+// --- void_anchor fire + pull tick ---
+// On fire: chain-style opener on nearest enemy, then a gravitational pull
+// zone that lasts 0.55s (enemies get dragged inward), then a delayed meteor
+// impact at the anchor point. warnLife on the meteorEffect marks the longer
+// warn duration so drawMeteorEffects can normalise the streak animation.
+function fireVoidAnchor(g, w, p) {
+  emit(g, EVT.WEAPON_FIRE, { weapon: 'void_anchor', x: p.x, y: p.y, pid: p.id, color: w.color });
+
+  // Opener: instant hit on nearest enemy inside pullRadius.
+  const pullR = w.pullRadius * (p.sizeMulti || 1);
+  let nearest = null, nearestDist = pullR;
+  for (const e of g.enemies) {
+    const d = Math.hypot(e.x - p.x, e.y - p.y);
+    if (d < nearestDist) { nearest = e; nearestDist = d; }
+  }
+  if (nearest) damageEnemy(g, nearest, w.baseDamage * p.damageMulti, p.id);
+
+  // Gravitational pull zone — drags all enemies inward for 0.55s.
+  if (!g.pendingPulls) g.pendingPulls = [];
+  g.pendingPulls.push({
+    x: p.x, y: p.y,
+    radius: pullR,
+    strength: w.pullStrength,
+    duration: 0.55,
+    elapsed: 0,
+  });
+
+  // Delayed impact meteor at anchor point.
+  const impactR = w.impactRadius * (p.sizeMulti || 1);
+  g.meteorEffects.push({
+    x: p.x, y: p.y,
+    radius: impactR,
+    damage: w.impactDamage * p.damageMulti,
+    life: 0.7, warnLife: 0.7,
+    phase: 'warn',
+    color: w.color,
+    owner: p.id,
+  });
+  emit(g, EVT.METEOR_WARN, { x: p.x, y: p.y, radius: impactR });
+}
+
+// Advances all active pull zones. Each zone pulls enemies toward its
+// centre for its duration, then expires. Called from tickSim after
+// updateMeteorEffects so the impact lands into a clustered group.
+export function updatePendingPulls(g, dt) {
+  if (!g.pendingPulls || g.pendingPulls.length === 0) return;
+  for (let i = g.pendingPulls.length - 1; i >= 0; i--) {
+    const pull = g.pendingPulls[i];
+    pull.elapsed += dt;
+    const r2 = pull.radius * pull.radius;
+    for (const e of g.enemies) {
+      const dx = pull.x - e.x;
+      const dy = pull.y - e.y;
+      if (dx * dx + dy * dy > r2) continue;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const force = pull.strength * dt;
+      e.x += (dx / d) * force;
+      e.y += (dy / d) * force;
+    }
+    if (pull.elapsed >= pull.duration) g.pendingPulls.splice(i, 1);
   }
 }

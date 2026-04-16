@@ -254,7 +254,8 @@ export function drawMeteorEffects(ctx, meteorEffects) {
     if (m.phase === 'warn') {
       // Falling streak from off-screen down to the warn ring — sells
       // the "something's coming" beat before the explosion.
-      const t = 1 - (m.life / 0.5);
+      // warnLife normalises non-standard warn durations (e.g. void_anchor uses 0.7s).
+      const t = 1 - (m.life / (m.warnLife || 0.5));
       const streakStart = m.y - 480 * (1 - t);
       const grad = ctx.createLinearGradient(m.x, streakStart, m.x, m.y);
       grad.addColorStop(0,   'rgba(255, 99, 72, 0)');
@@ -776,4 +777,35 @@ export function spawnFireTrail(p, dt, particles, trailState) {
     radius: 2 + Math.random() * 2,
     color: Math.random() > 0.4 ? '#f39c12' : '#e74c3c',
   });
+}
+
+// Draws active void_anchor gravitational pull zones — a shrinking
+// dashed ring in the anchor colour that fades as the pull expires.
+// Rings start at full pull radius and contract 30% over their lifetime
+// to read as "pulling inward". Inner ring at 60% radius adds depth.
+export function drawPendingPulls(ctx, pendingPulls) {
+  if (!pendingPulls || pendingPulls.length === 0) return;
+  for (const pull of pendingPulls) {
+    const progress = pull.elapsed / pull.duration;
+    const alpha = 0.5 * (1 - progress);
+    const ringR = pull.radius * (1 - progress * 0.3);
+    ctx.save();
+    ctx.setLineDash([6, 6]);
+    ctx.shadowColor = '#6c5ce7';
+    ctx.shadowBlur = 10;
+
+    ctx.strokeStyle = `rgba(108, 92, 231, ${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(pull.x, pull.y, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = `rgba(162, 155, 254, ${alpha * 0.6})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(pull.x, pull.y, ringR * 0.6, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
 }

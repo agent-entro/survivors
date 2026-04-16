@@ -7,6 +7,7 @@ export const WEAPON_ICONS = {
   shield: '🛡️', lightning_field: '⚡',
   dragon_storm: '🐉',
   thunder_god: '⚡', meteor_orbit: '🔥', fortress: '🏰',
+  void_anchor: '🌑',
 };
 
 export function createWeapon(type) {
@@ -84,6 +85,18 @@ export function createWeapon(type) {
       shockwaveRadius: 120, shockwaveDamage: 40,
       active: false, chargeTimer: 0, chargeDx: 0, chargeDy: 0,
       phase: 0, color: '#74b9ff',
+    };
+    // Meteor + Chain fusion. Fires immediately at nearest enemy (chain-
+    // style opener), then creates a 0.55s gravitational pull that drags
+    // all enemies within 200u inward, followed by a 110-damage crushing
+    // impact at the anchor point. Enemies cluster in → get crushed.
+    // Pure cooldown burst (3.5s); no always-on component.
+    case 'void_anchor': return {
+      type: 'void_anchor', cooldown: 3.5, timer: 0,
+      baseDamage: 45, impactDamage: 110,
+      pullRadius: 200, pullStrength: 220,
+      impactRadius: 85,
+      color: '#6c5ce7',
     };
     default: return null;
   }

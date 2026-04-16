@@ -70,6 +70,18 @@ export const POWERUPS = [
       emit(g, EVT.EVOLUTION, { x: p.x, y: p.y, name: 'fortress', pid: p.id });
     }
   },
+  // Cross-pair: Meteor + Chain fuse into gravitational pull + crushing impact.
+  // Opener zap lands immediately on the nearest enemy; the 0.55s pull drags
+  // the pack inward; the 0.7s delayed impact crushes the clustered group.
+  // High single-fire burst on a 3.5s cooldown — best against dense waves.
+  { id: 'evo_void_anchor', name: 'VOID ANCHOR', desc: 'Meteor + Chain fuse into a gravitational pull that crushes enemies on impact', icon: '🌑',
+    max: 1, requiresEvo: ['meteor_up', 'chain_up'],
+    apply(g, p) {
+      p.weapons = p.weapons.filter(w => w.type !== 'meteor' && w.type !== 'chain');
+      p.weapons.push(createWeapon('void_anchor'));
+      emit(g, EVT.EVOLUTION, { x: p.x, y: p.y, name: 'void_anchor', pid: p.id });
+    }
+  },
 ];
 
 // Filter the catalog to entries the player can pick right now, given
