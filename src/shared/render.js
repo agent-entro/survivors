@@ -720,6 +720,7 @@ export function drawWeaponAuras(ctx, players, time, viewport) {
         const phase = w.phase || 0;
         const orbitR = w.radius * sm;
         const count = w.bladeCount + pb;
+        // Pass 1: arc trails — no shadow needed.
         ctx.strokeStyle = w.color;
         ctx.lineWidth = 2;
         for (let b = 0; b < count; b++) {
@@ -731,23 +732,27 @@ export function drawWeaponAuras(ctx, players, time, viewport) {
             ctx.stroke();
           }
           ctx.globalAlpha = 1;
+        }
+        // Pass 2: blade bodies — shadow set ONCE for all blades.
+        ctx.shadowColor = w.color;
+        ctx.shadowBlur = 8;
+        for (let b = 0; b < count; b++) {
+          const angle = phase + (b * Math.PI * 2 / count);
           const bx = p.x + Math.cos(angle) * orbitR;
           const by = p.y + Math.sin(angle) * orbitR;
-          ctx.save();
+          ctx.save(); // saves shadowBlur=8; restore() brings it back → no reset needed between blades
           ctx.translate(bx, by);
           ctx.rotate(angle + Math.PI / 2);
           ctx.fillStyle = w.color;
-          ctx.shadowColor = w.color;
-          ctx.shadowBlur = 8;
           ctx.beginPath();
           ctx.moveTo(0, -10);
           ctx.lineTo(4, 4);
           ctx.lineTo(-4, 4);
           ctx.closePath();
           ctx.fill();
-          ctx.shadowBlur = 0;
           ctx.restore();
         }
+        ctx.shadowBlur = 0;
       }
 
       if (w.type === 'shield') {
@@ -819,36 +824,40 @@ export function drawWeaponAuras(ctx, players, time, viewport) {
       if (w.type === 'meteor_orbit') {
         const orbitR = w.radius * sm;
         const count = w.bladeCount + pb;
+        const basePhase = w.phase || 0;
+        // Pass 1: ember trails — no shadow.
         for (let b = 0; b < count; b++) {
-          const angle = (w.phase || 0) + (b * Math.PI * 2 / count);
-          const bx = p.x + Math.cos(angle) * orbitR;
-          const by = p.y + Math.sin(angle) * orbitR;
+          const angle = basePhase + (b * Math.PI * 2 / count);
           for (let t = 1; t <= 3; t++) {
             const ta = angle - t * 0.1;
-            const tx = p.x + Math.cos(ta) * orbitR;
-            const ty = p.y + Math.sin(ta) * orbitR;
             ctx.globalAlpha = 0.3 / t;
             ctx.fillStyle = '#ff6348';
             ctx.beginPath();
-            ctx.arc(tx, ty, 4 - t, 0, Math.PI * 2);
+            ctx.arc(p.x + Math.cos(ta) * orbitR, p.y + Math.sin(ta) * orbitR, 4 - t, 0, Math.PI * 2);
             ctx.fill();
           }
           ctx.globalAlpha = 1;
+        }
+        // Pass 2: meteor blade bodies — shadow set ONCE for the batch.
+        ctx.shadowColor = w.color;
+        ctx.shadowBlur = 10;
+        for (let b = 0; b < count; b++) {
+          const angle = basePhase + (b * Math.PI * 2 / count);
+          const bx = p.x + Math.cos(angle) * orbitR;
+          const by = p.y + Math.sin(angle) * orbitR;
           ctx.save();
           ctx.translate(bx, by);
           ctx.rotate(angle + Math.PI / 2);
           ctx.fillStyle = w.color;
-          ctx.shadowColor = w.color;
-          ctx.shadowBlur = 10;
           ctx.beginPath();
           ctx.moveTo(0, -14);
           ctx.lineTo(6, 6);
           ctx.lineTo(-6, 6);
           ctx.closePath();
           ctx.fill();
-          ctx.shadowBlur = 0;
           ctx.restore();
         }
+        ctx.shadowBlur = 0;
       }
 
       // Charge cooldown indicator — red arc that fills as cooldown
@@ -1409,15 +1418,16 @@ export function spawnFireTrail(p, dt, particles, trailState) {
 
 export function drawPendingPulls(ctx, pendingPulls) {
   if (!pendingPulls || pendingPulls.length === 0) return;
+  // All void_anchor pulls share the same hue — set shadow once for the batch.
+  ctx.shadowColor = '#6c5ce7';
+  ctx.shadowBlur = 10;
+  ctx.setLineDash([6, 6]);
   for (const pull of pendingPulls) {
     const progress = pull.elapsed / pull.duration;
     const alpha = 0.5 * (1 - progress);
     const ringR = pull.radius * (1 - progress * 0.3);
     ctx.strokeStyle = `rgba(108, 92, 231, ${alpha})`;
     ctx.lineWidth = 2;
-    ctx.setLineDash([6, 6]);
-    ctx.shadowColor = '#6c5ce7';
-    ctx.shadowBlur = 10;
     ctx.globalAlpha = 1;
     ctx.beginPath();
     ctx.arc(pull.x, pull.y, ringR, 0, Math.PI * 2);
@@ -1427,7 +1437,7 @@ export function drawPendingPulls(ctx, pendingPulls) {
     ctx.beginPath();
     ctx.arc(pull.x, pull.y, ringR * 0.6, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.shadowBlur = 0;
   }
+  ctx.setLineDash([]);
+  ctx.shadowBlur = 0;
 }
