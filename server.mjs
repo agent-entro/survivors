@@ -19,11 +19,79 @@ import { MAPS } from './src/shared/maps.js';
 import { pushOutOfObstacles } from './src/shared/sim/collision.js';
 import { applyUnlocks, sanitizePrestige } from './src/shared/prestige.js';
 
-// Map rotation. Tomorrow this'll be a vote / lobby choice; for now the
-// server picks a random one each session reset.
 const MAP_ROTATION = ['arena', 'forest', 'ruins', 'graveyard'];
 function pickMapId(rng) {
   return MAP_ROTATION[rng.int(MAP_ROTATION.length)];
+}
+
+// Map voting — 15-second window opens when the first player joins a fresh
+// server. All connecting players queue in pendingPlayers and vote. Winner
+// (most votes; random tie-break; random if nobody voted) is used when
+// initGame() is called after the window closes or everyone votes early.
+const VOTE_DURATION_MS = 15_000;
+let votingActive = false;
+let voteDeadline  = 0;
+const voteMap        = new Map(); // ws → mapId
+const pendingPlayers = new Map(); // ws → { pid, name, weapon, prestige }
+
+function tallyVotes() {
+  const counts = Object.fromEntries(MAP_ROTATION.map(id => [id, 0]));
+  for (const mapId of voteMap.values()) counts[mapId] = (counts[mapId] || 0) + 1;
+  return counts;
+}
+
+function broadcastVoteState() {
+  if (!votingActive || pendingPlayers.size === 0) return;
+  const payload = JSON.stringify({
+    type: 'vote_state',
+    tally: tallyVotes(),
+    deadline: voteDeadline,
+    maps: MAP_ROTATION.map(id => ({ id, name: MAPS[id].name })),
+    voterCount: voteMap.size,
+    totalCount: pendingPlayers.size,
+  });
+  for (const ws of pendingPlayers.keys()) {
+    try { ws.send(payload); } catch { /* dead socket */ }
+  }
+}
+
+function resolveVote() {
+  const tally     = tallyVotes();
+  const total     = Object.values(tally).reduce((a, b) => a + b, 0);
+  const maxVotes  = total > 0 ? Math.max(...Object.values(tally)) : 0;
+  const winners   = total > 0
+    ? Object.entries(tally).filter(([, v]) => v === maxVotes).map(([k]) => k)
+    : MAP_ROTATION;
+  const winnerMap = winners[Math.floor(Math.random() * winners.length)];
+
+  votingActive = false;
+  voteDeadline = 0;
+  voteMap.clear();
+
+  game = initGame(winnerMap);
+  console.log(`[*] vote resolved → ${winnerMap} (tally: ${JSON.stringify(tally)})`);
+
+  for (const [ws, params] of pendingPlayers) {
+    const p = makePlayer(
+      params.pid, params.name, params.weapon,
+      game.rng, MAPS[game.mapId].spawns[0], params.prestige,
+    );
+    players.set(ws, p);
+    try {
+      ws.send(JSON.stringify({
+        type: 'welcome',
+        you: p.id,
+        name: p.name,
+        color: p.color,
+        arena: game.arena,
+        map: { id: game.mapId, obstacles: game.obstacles },
+      }));
+    } catch { /* dead socket — close handler cleans up */ }
+    for (let i = 1; i < p.level; i++) {
+      game.events.push({ type: 'levelUp', level: i + 1, pid: p.id });
+    }
+  }
+  pendingPlayers.clear();
 }
 import {
   WORLD_W, WORLD_H, PLAYER_SPEED, PLAYER_RADIUS, PLAYER_MAX_HP,
@@ -90,9 +158,9 @@ function makePlayer(pid, name, weaponType, rng, spawn, prestige) {
   return p;
 }
 
-function initGame() {
+function initGame(forcedMapId = null) {
   const rng = createRng(Date.now() & 0x7fffffff);
-  const mapId = pickMapId(rng);
+  const mapId = forcedMapId ?? pickMapId(rng);
   const map = MAPS[mapId];
   console.log(`[*] map: ${mapId} (${map.name})`);
   return {
@@ -343,6 +411,8 @@ function broadcast() {
 function startLoop() {
   game = initGame();
   setInterval(() => {
+    if (votingActive && Date.now() >= voteDeadline) resolveVote();
+    if (votingActive) broadcastVoteState();
     tick(TICK_DT);
     broadcast();
     // Clear events after every client sees the snapshot once — each
@@ -357,55 +427,103 @@ function startLoop() {
 const wss = new WebSocketServer({ port: PORT, path: '/ws', maxPayload: 4096 });
 wss.on('connection', (ws) => {
   const pid = nextId++;
-  let player = null;
 
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
+    // Always read from the authoritative map so post-vote joins work.
+    const player = players.get(ws);
+
     if (msg.type === 'join') {
-      if (player) return; // double-join on same socket: first wins
-      if (players.size >= MAX_PLAYERS) {
-        ws.send(JSON.stringify({ type: 'error', reason: 'server_full' }));
-        ws.close();
+      if (player || pendingPlayers.has(ws)) return; // double-join guard
+      if (players.size + pendingPlayers.size >= MAX_PLAYERS) {
+        try {
+          ws.send(JSON.stringify({ type: 'error', reason: 'server_full' }));
+          ws.close();
+        } catch { /* already gone */ }
         return;
       }
-      // Reset game state when first player joins an empty server so they
-      // don't spawn into a wave-18 death trap left over from prior sessions.
+
       const anyAlive = [...players.values()].some(p => p.alive);
+
+      // Open vote window when the server is empty and no vote is running.
+      if (!anyAlive && !votingActive && pendingPlayers.size === 0) {
+        votingActive = true;
+        voteDeadline = Date.now() + VOTE_DURATION_MS;
+        voteMap.clear();
+        console.log('[*] vote window opened (15s)');
+      }
+
+      const name    = String(msg.name || '').slice(0, 12).trim() || `player${pid}`;
+      const weapon  = STARTING_WEAPONS.has(msg.weapon) ? msg.weapon : 'spit';
+      const prestige = sanitizePrestige(msg.prestige);
+
+      if (votingActive) {
+        // Queue player; send initial vote state so they see the UI immediately.
+        pendingPlayers.set(ws, { pid, name, weapon, prestige });
+        console.log(`[+] ${name} queued for vote (${pendingPlayers.size} waiting)`);
+        try {
+          ws.send(JSON.stringify({
+            type: 'vote_state',
+            tally: tallyVotes(),
+            deadline: voteDeadline,
+            maps: MAP_ROTATION.map(id => ({ id, name: MAPS[id].name })),
+            voterCount: voteMap.size,
+            totalCount: pendingPlayers.size,
+          }));
+        } catch { /* dead socket */ }
+        return;
+      }
+
+      // Active game — normal join path (no vote window).
       if (!anyAlive) {
         game = initGame();
         console.log('[*] game reset (no alive players)');
       }
-      const name = String(msg.name || '').slice(0, 12).trim() || `player${pid}`;
-      const weapon = STARTING_WEAPONS.has(msg.weapon) ? msg.weapon : 'spit';
-      const prestige = sanitizePrestige(msg.prestige);
-      player = makePlayer(pid, name, weapon, game.rng, MAPS[game.mapId].spawns[0], prestige);
-      players.set(ws, player);
+      const p = makePlayer(pid, name, weapon, game.rng, MAPS[game.mapId].spawns[0], prestige);
+      players.set(ws, p);
       console.log(`[+] ${name} joined with ${weapon} (${players.size} players)`);
-      ws.send(JSON.stringify({
-        type: 'welcome',
-        you: pid,
-        name: player.name,
-        color: player.color,
-        arena: game.arena,
-        map: { id: game.mapId, obstacles: game.obstacles },
-      }));
+      try {
+        ws.send(JSON.stringify({
+          type: 'welcome',
+          you: pid,
+          name: p.name,
+          color: p.color,
+          arena: game.arena,
+          map: { id: game.mapId, obstacles: game.obstacles },
+        }));
+      } catch { /* dead socket */ }
       // Headstart prestige: queue level-up choice for the bonus level so
       // the player picks a perk on join. Processed next tick when
       // game.players is rebuilt from the players Map.
-      for (let i = 1; i < player.level; i++) {
+      for (let i = 1; i < p.level; i++) {
         game.events.push({ type: 'levelUp', level: i + 1, pid });
       }
       return;
     }
+
+    // Vote message — valid only during the vote window, from pending players.
+    if (msg.type === 'vote') {
+      if (!votingActive || !pendingPlayers.has(ws)) return;
+      const mapId = MAP_ROTATION.includes(msg.mapId) ? msg.mapId : null;
+      if (!mapId) return;
+      voteMap.set(ws, mapId);
+      const params = pendingPlayers.get(ws);
+      console.log(`[vote] ${params?.name} → ${mapId} (${voteMap.size}/${pendingPlayers.size})`);
+      // Early close if everyone voted.
+      if (voteMap.size >= pendingPlayers.size) resolveVote();
+      return;
+    }
+
+    // Pending players can only send join/vote — block everything else.
     if (!player) return;
 
     if (msg.type === 'input') {
       const k = msg.keys || {};
-      player.inputs.up = !!k.up;
-      player.inputs.down = !!k.down;
-      player.inputs.left = !!k.left;
+      player.inputs.up    = !!k.up;
+      player.inputs.down  = !!k.down;
+      player.inputs.left  = !!k.left;
       player.inputs.right = !!k.right;
     } else if (msg.type === 'name') {
       const newName = String(msg.name || '').slice(0, 12).trim();
@@ -414,7 +532,7 @@ wss.on('connection', (ws) => {
       // Only let dead players respawn — without this a live player could
       // spam respawn to reset iframes + heal to full + reroll weapon.
       if (player.alive) return;
-      const weapon = STARTING_WEAPONS.has(msg.weapon) ? msg.weapon : 'spit';
+      const weapon   = STARTING_WEAPONS.has(msg.weapon) ? msg.weapon : 'spit';
       const prestige = sanitizePrestige(msg.prestige);
       Object.assign(player, makePlayer(pid, player.name, weapon, game.rng, MAPS[game.mapId].spawns[0], prestige));
       // Headstart: queue level-up choices on respawn too.
@@ -435,8 +553,21 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     if (players.has(ws)) {
-      console.log(`[-] ${player ? player.name : '?'} left (${players.size - 1} players)`);
+      const p = players.get(ws);
+      console.log(`[-] ${p?.name ?? '?'} left (${players.size - 1} players)`);
       players.delete(ws);
+    } else if (pendingPlayers.has(ws)) {
+      const params = pendingPlayers.get(ws);
+      pendingPlayers.delete(ws);
+      voteMap.delete(ws);
+      console.log(`[-] ${params.name} left vote queue (${pendingPlayers.size} waiting)`);
+      // Cancel the vote if everyone bailed.
+      if (pendingPlayers.size === 0 && votingActive) {
+        votingActive = false;
+        voteDeadline = 0;
+        voteMap.clear();
+        console.log('[*] vote cancelled (all players left)');
+      }
     }
   });
 });

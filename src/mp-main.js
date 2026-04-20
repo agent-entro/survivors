@@ -249,6 +249,84 @@ let mapId = null;
 let obstacles = [];
 let bgCanvas = null;
 
+// --- map vote ---
+const MAP_VOTE_EMOJIS = { arena: '⚔️', forest: '🌲', ruins: '🏛️', graveyard: '💀' };
+let myVote = null;
+let voteCountdownTimer = null;
+
+function showVoteScreen(msg) {
+  document.getElementById('start-screen').style.display = 'none';
+  const screen = document.getElementById('vote-screen');
+  if (screen) screen.style.display = 'flex';
+  updateVoteDisplay(msg);
+}
+
+function updateVoteDisplay({ tally, deadline, maps, voterCount, totalCount }) {
+  const container = document.getElementById('vote-maps');
+  if (!container) return;
+
+  // Rebuild cards on first call or if count changed.
+  if (container.children.length !== maps.length) {
+    container.innerHTML = '';
+    for (const map of maps) {
+      const div = document.createElement('div');
+      div.className = 'vote-card';
+      div.dataset.mapId = map.id;
+      div.innerHTML = `
+        <div class="vm-icon">${MAP_VOTE_EMOJIS[map.id] || '🗺️'}</div>
+        <div class="vm-name">${escapeHTML(map.name)}</div>
+        <div class="vm-votes">0 votes</div>
+      `;
+      div.addEventListener('click', () => castVote(map.id));
+      container.appendChild(div);
+    }
+  }
+
+  // Update counts + highlight voted card.
+  for (const card of container.querySelectorAll('.vote-card')) {
+    const id = card.dataset.mapId;
+    const count = tally[id] || 0;
+    card.querySelector('.vm-votes').textContent = `${count} vote${count !== 1 ? 's' : ''}`;
+    card.classList.toggle('voted', id === myVote);
+  }
+
+  const statusEl = document.getElementById('vote-status');
+  if (statusEl) statusEl.textContent = `${voterCount} / ${totalCount} voted`;
+
+  // Live countdown — driven by server deadline timestamp so all clients agree.
+  if (voteCountdownTimer) clearInterval(voteCountdownTimer);
+  const tickTimer = () => {
+    const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    const timerEl   = document.getElementById('vote-timer');
+    if (!timerEl) return;
+    timerEl.textContent = remaining;
+    timerEl.classList.toggle('urgent', remaining <= 5);
+    if (remaining <= 0) { clearInterval(voteCountdownTimer); voteCountdownTimer = null; }
+  };
+  tickTimer();
+  voteCountdownTimer = setInterval(tickTimer, 250);
+}
+
+function castVote(mapId) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  myVote = mapId;
+  ws.send(JSON.stringify({ type: 'vote', mapId }));
+  // Optimistic highlight before next vote_state arrives.
+  const container = document.getElementById('vote-maps');
+  if (container) {
+    for (const card of container.querySelectorAll('.vote-card')) {
+      card.classList.toggle('voted', card.dataset.mapId === mapId);
+    }
+  }
+}
+
+function hideVoteScreen() {
+  const screen = document.getElementById('vote-screen');
+  if (screen) screen.style.display = 'none';
+  if (voteCountdownTimer) { clearInterval(voteCountdownTimer); voteCountdownTimer = null; }
+  myVote = null;
+}
+
 // State interpolation: store previous + current snapshots
 let prevState = null;
 let currState = null;
@@ -340,7 +418,13 @@ function connectWS() {
     let msg;
     try { msg = JSON.parse(evt.data); } catch (e) { return; }
 
+    if (msg.type === 'vote_state') {
+      showVoteScreen(msg);
+      return;
+    }
+
     if (msg.type === 'welcome') {
+      hideVoteScreen();
       myId = msg.you;
       myName = msg.name;
       arena = msg.arena || arena;
